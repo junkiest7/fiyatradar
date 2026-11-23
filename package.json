@@ -1,0 +1,19 @@
+{
+  "name": "fiyat-arastirma-botu",
+  "version": "1.0.0",
+  "description": "Türkiye e-ticaret piyasası için kargo dahil net fiyat, birim maliyet, fırsat skoru ve 6 aylık fiyat geçmişi analiz botu",
+  "main": "src/server.js",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node --no-warnings src/server.js",
+    "dev": "node --no-warnings --watch src/server.js",
+    "test": "node --no-warnings --test tests/*.test.js"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "express": "^4.21.2"
+  }
+}

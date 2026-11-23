@@ -1,0 +1,27 @@
+{
+  "name": "FiyatRadar — Türkiye Fiyat Araştırma Botu",
+  "short_name": "FiyatRadar",
+  "description": "Kargo dahil net fiyat, birim maliyet, kargo tuzağı tespiti ve 6 aylık fiyat geçmişi analizi.",
+  "lang": "tr",
+  "start_url": "/?source=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#182033",
+  "theme_color": "#f7f6f2",
+  "categories": ["shopping", "finance", "utilities"],
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: fiyatradar
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
+      - key: TIMEZONE
+        value: Europe/Istanbul

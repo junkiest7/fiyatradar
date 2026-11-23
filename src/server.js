@@ -1,0 +1,379 @@
+/**
+ * FiyatRadar — Detaylı Fiyat Araştırma Botu Sunucusu
+ * Express REST API + Statik Web Arayüzü
+ */
+
+import express from "express";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  getProductDetail,
+  getSuggestions,
+  normalizeProductUrl,
+  searchProducts,
+} from "./scraper.js";
+import {
+  clearSearchHistory,
+  getSearchHistory,
+  getWatchlist,
+  recordSearch,
+  recordSnapshot,
+  removeWatchlistItem,
+  updateWatchlistTarget,
+  upsertWatchlistItem,
+} from "./db.js";
+import { formatTrNumber } from "./parsers.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PUBLIC_DIR = path.resolve(__dirname, "..", "public");
+
+const app = express();
+const PORT = Number.parseInt(process.env.PORT, 10) || 3456;
+
+app.use(express.json({ limit: "1mb" }));
+app.get("/sw.js", (_req, res) => {
+  res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+  res.sendFile(path.join(PUBLIC_DIR, "sw.js"));
+});
+app.get("/manifest.webmanifest", (_req, res) => {
+  res.setHeader("Content-Type", "application/manifest+json; charset=utf-8");
+  res.sendFile(path.join(PUBLIC_DIR, "manifest.webmanifest"));
+});
+app.use(express.static(PUBLIC_DIR));
+
+// Health check
+app.get("/api/health", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "FiyatRadar",
+    time: new Date().toISOString(),
+  });
+});
+
+// Live Turkish autocomplete suggestions
+app.get("/api/suggest", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    if (q.length < 2) return res.json({ suggestions: [] });
+    const suggestions = await getSuggestions(q);
+    res.json({ suggestions });
+  } catch (err) {
+    res.json({ suggestions: [], error: err.message });
+  }
+});
+
+// Live product search with sorting and price filtering
+app.get("/api/search", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    if (!q) {
+      return res.status(400).json({ error: "Lütfen aramak istediğiniz ürün adını veya bağlantısını yazın." });
+    }
+
+    const page = Number.parseInt(req.query.page, 10) || 1;
+    const refresh = req.query.refresh === "1" || req.query.refresh === "true";
+    const sort = String(req.query.sort || "relevance");
+    const minPrice = req.query.minPrice ? Number.parseFloat(req.query.minPrice) : null;
+    const maxPrice = req.query.maxPrice ? Number.parseFloat(req.query.maxPrice) : null;
+
+    const result = await searchProducts(q, { page, refresh });
+    let list = [...result.products];
+
+    if (Number.isFinite(minPrice)) {
+      list = list.filter((p) => typeof p.lowestPrice === "number" && p.lowestPrice >= minPrice);
+    }
+    if (Number.isFinite(maxPrice)) {
+      list = list.filter((p) => typeof p.lowestPrice === "number" && p.lowestPrice <= maxPrice);
+    }
+
+    if (sort === "price_asc") {
+      list.sort((a, b) => (a.lowestPrice ?? Infinity) - (b.lowestPrice ?? Infinity));
+    } else if (sort === "price_desc") {
+      list.sort((a, b) => (b.lowestPrice ?? -1) - (a.lowestPrice ?? -1));
+    } else if (sort === "offers_desc") {
+      list.sort((a, b) => (b.offerCount ?? 0) - (a.offerCount ?? 0));
+    } else if (sort === "unit_asc") {
+      list.sort((a, b) => {
+        const ua = a.unitInfo?.unitPrice ?? Infinity;
+        const ub = b.unitInfo?.unitPrice ?? Infinity;
+        if (ua !== ub) return ua - ub;
+        return (a.lowestPrice ?? Infinity) - (b.lowestPrice ?? Infinity);
+      });
+    }
+
+    const validPrices = result.products.map((p) => p.lowestPrice).filter((v) => typeof v === "number" && v > 0);
+    const globalMin = validPrices.length ? Math.min(...validPrices) : null;
+
+    if (page === 1 && !result.directProduct) {
+      try {
+        recordSearch(q, result.totalFound, globalMin);
+      } catch {
+        // Non-fatal DB write error
+      }
+    }
+
+    res.json({
+      ...result,
+      filteredCount: list.length,
+      products: list,
+    });
+  } catch (err) {
+    res.status(502).json({
+      error: err.message || "Ürün araması sırasında bir hata oluştu.",
+    });
+  }
+});
+
+// Deep single-product price analysis
+app.get("/api/product", async (req, res) => {
+  try {
+    const rawUrl = String(req.query.url || "").trim();
+    if (!rawUrl) {
+      return res.status(400).json({ error: "Ürün bağlantısı (url) gereklidir." });
+    }
+    const refresh = req.query.refresh === "1" || req.query.refresh === "true";
+    const detail = await getProductDetail(rawUrl, { refresh });
+
+    if (detail.id && detail.stats?.minNet) {
+      try {
+        recordSnapshot(
+          detail.id,
+          detail.stats.minNet,
+          detail.picks?.cheapestNet?.store || "",
+          detail.totalOfferCount
+        );
+      } catch {
+        // Non-fatal
+      }
+    }
+
+    res.json(detail);
+  } catch (err) {
+    res.status(502).json({
+      error: err.message || "Ürün detayları alınırken bir hata oluştu.",
+    });
+  }
+});
+
+// Side-by-side comparison of up to 4 products
+app.post("/api/compare", async (req, res) => {
+  try {
+    const urls = Array.isArray(req.body?.urls) ? req.body.urls.slice(0, 4) : [];
+    if (urls.length < 2) {
+      return res.status(400).json({ error: "Karşılaştırma için en az 2 ürün seçmelisiniz." });
+    }
+
+    const validUrls = urls.map(normalizeProductUrl).filter(Boolean);
+    if (validUrls.length < 2) {
+      return res.status(400).json({ error: "Geçerli en az 2 ürün bağlantısı gereklidir." });
+    }
+
+    const results = await Promise.all(
+      validUrls.map(async (u) => {
+        try {
+          return await getProductDetail(u);
+        } catch (err) {
+          return { url: u, error: err.message };
+        }
+      })
+    );
+
+    const items = results.filter((r) => !r.error);
+    if (!items.length) {
+      return res.status(502).json({ error: "Seçilen ürünlerin verileri alınamadı." });
+    }
+
+    // Collect common / frequent spec names across compared items
+    const specCounts = new Map();
+    for (const item of items) {
+      for (const s of item.specs || []) {
+        specCounts.set(s.name, (specCounts.get(s.name) || 0) + 1);
+      }
+    }
+    const specKeys = [...specCounts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "tr"))
+      .slice(0, 20)
+      .map(([k]) => k);
+
+    res.json({
+      comparedAt: new Date().toISOString(),
+      items,
+      specKeys,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message || "Karşılaştırma başarısız oldu." });
+  }
+});
+
+// CSV export (UTF-8 BOM + semicolon delimiter for seamless Turkish Excel import)
+app.get("/api/export/csv", async (req, res) => {
+  try {
+    const rawUrl = String(req.query.url || "").trim();
+    const detail = await getProductDetail(rawUrl);
+
+    const escapeCsv = (val) => {
+      const s = String(val ?? "").replace(/"/g, '""');
+      return `"${s}"`;
+    };
+
+    const headers = [
+      "Sıra",
+      "Platform",
+      "Satıcı",
+      "Ürün Fiyatı (TL)",
+      "Kargo (TL)",
+      "Kargo Durumu",
+      "Kargo Dahil Net Fiyat (TL)",
+      "En Ucuza Göre Fark (%)",
+      "Birim Fiyat",
+      "Fırsat Skoru (0-100)",
+      "Stok",
+      "Teslimat",
+      "Son Güncelleme",
+      "Bağlantı",
+    ];
+
+    const rows = (detail.offers || []).map((o) => [
+      o.rankByNet,
+      o.store?.platform || "",
+      o.store?.seller || o.store?.platform || "",
+      formatTrNumber(o.basePrice),
+      formatTrNumber(o.shippingCost),
+      o.shipping?.label || "",
+      formatTrNumber(o.netPrice),
+      `%${formatTrNumber(o.diffFromMinPct)}`,
+      o.unitPrice !== null && detail.unitInfo
+        ? `${formatTrNumber(o.unitPrice)} TL / ${detail.unitInfo.unitLabel}`
+        : "-",
+      o.dealScore,
+      o.stockText || "",
+      o.delivery?.label || "",
+      o.lastUpdated || "",
+      o.url || "",
+    ]);
+
+    const csvLines = [
+      headers.map(escapeCsv).join(";"),
+      ...rows.map((r) => r.map(escapeCsv).join(";")),
+    ];
+
+    const trMap = { ğ: "g", ü: "u", ş: "s", ı: "i", ö: "o", ç: "c", İ: "i", Ğ: "g", Ü: "u", Ş: "s", Ö: "o", Ç: "c" };
+    const safeSlug = (detail.title || "fiyat-raporu")
+      .replace(/[ğüşıöçİĞÜŞÖÇ]/g, (ch) => trMap[ch] || ch)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 50);
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="fiyatradar-${safeSlug || "rapor"}.csv"`);
+    res.send(`\uFEFF${csvLines.join("\r\n")}`);
+  } catch (err) {
+    res.status(502).json({ error: err.message || "CSV dışa aktarma başarısız." });
+  }
+});
+
+// Search History endpoints
+app.get("/api/history", (_req, res) => {
+  res.json({ items: getSearchHistory(24) });
+});
+
+app.delete("/api/history", (_req, res) => {
+  clearSearchHistory();
+  res.json({ ok: true });
+});
+
+// Watchlist endpoints
+app.get("/api/watchlist", (_req, res) => {
+  res.json({ items: getWatchlist() });
+});
+
+app.post("/api/watchlist", (req, res) => {
+  try {
+    const body = req.body || {};
+    const url = normalizeProductUrl(body.url);
+    if (!url || !body.title) {
+      return res.status(400).json({ error: "Geçerli ürün adı ve bağlantısı gereklidir." });
+    }
+    const saved = upsertWatchlistItem({
+      id: body.id,
+      title: String(body.title).trim(),
+      url,
+      image: body.image || "",
+      target_price: body.target_price ? Number.parseFloat(body.target_price) : null,
+      last_net_price: body.last_net_price ? Number.parseFloat(body.last_net_price) : null,
+      best_store: body.best_store || "",
+      verdict_score: body.verdict_score ?? null,
+      verdict_label: body.verdict_label || "",
+      offer_count: body.offer_count || 0,
+    });
+    res.status(201).json({ item: saved, items: getWatchlist() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.patch("/api/watchlist/:id", (req, res) => {
+  const targetPrice =
+    req.body?.target_price !== null && req.body?.target_price !== undefined && req.body?.target_price !== ""
+      ? Number.parseFloat(req.body.target_price)
+      : null;
+  const updated = updateWatchlistTarget(req.params.id, targetPrice);
+  if (!updated) {
+    return res.status(404).json({ error: "Takip edilen ürün bulunamadı." });
+  }
+  res.json({ item: updated, items: getWatchlist() });
+});
+
+app.delete("/api/watchlist/:id", (req, res) => {
+  const removed = removeWatchlistItem(req.params.id);
+  if (!removed) {
+    return res.status(404).json({ error: "Takip edilen ürün bulunamadı." });
+  }
+  res.json({ ok: true, items: getWatchlist() });
+});
+
+// Live batch refresh of all watched items
+app.post("/api/watchlist/refresh", async (_req, res) => {
+  try {
+    const current = getWatchlist();
+    const results = [];
+    for (const item of current) {
+      try {
+        const detail = await getProductDetail(item.url, { refresh: true });
+        upsertWatchlistItem({
+          id: item.id,
+          title: detail.title,
+          url: item.url,
+          image: detail.image,
+          target_price: item.target_price,
+          last_net_price: detail.stats?.minNet ?? detail.lowPrice,
+          best_store: detail.picks?.cheapestNet?.store || "",
+          verdict_score: detail.verdict?.score ?? null,
+          verdict_label: detail.verdict?.label || "",
+          offer_count: detail.totalOfferCount,
+        });
+        results.push({ id: item.id, ok: true });
+      } catch (err) {
+        results.push({ id: item.id, ok: false, error: err.message });
+      }
+    }
+    res.json({ refreshed: results, items: getWatchlist() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Fallback to index.html for SPA
+app.get("*", (_req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, "index.html"));
+});
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`FiyatRadar sunucusu http://localhost:${PORT} adresinde çalışıyor.`);
+  });
+}
+
+export default app;

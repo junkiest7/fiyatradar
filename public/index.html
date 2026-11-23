@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>FiyatRadar — Türkiye Detaylı Fiyat Araştırma Botu</title>
+  <meta name="description" content="Amazon TR, Trendyol, Hepsiburada, n11, Pazarama, idefix ve daha fazlasında kargo dahil net fiyat, birim maliyet, fırsat skoru ve 6 aylık fiyat geçmişi analizi." />
+  <meta name="theme-color" content="#f7f6f2" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="FiyatRadar" />
+  <meta name="format-detection" content="telephone=no" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="container topbar-inner">
+      <a href="#home" id="brandLogo" class="brand" aria-label="FiyatRadar Ana Sayfa">
+        <span class="brand-mark" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="7"></circle>
+            <path d="M21 21l-4.35-4.35"></path>
+            <path d="M8 11h6"></path>
+            <path d="M11 8v6"></path>
+          </svg>
+        </span>
+        <span class="brand-name">FiyatRadar</span>
+        <span class="brand-tag">TR Piyasa Analizi</span>
+      </a>
+
+      <nav class="nav-tabs" aria-label="Ana gezinme">
+        <button type="button" id="navSearch" class="nav-tab active" data-view="search">Araştır</button>
+        <button type="button" id="navCompare" class="nav-tab" data-view="compare">
+          Karşılaştır <span id="compareBadge" class="tab-count" hidden>0</span>
+        </button>
+        <button type="button" id="navWatchlist" class="nav-tab" data-view="watchlist">
+          Takip Listem <span id="watchlistBadge" class="tab-count" hidden>0</span>
+        </button>
+        <button type="button" id="navHistory" class="nav-tab" data-view="history">Geçmiş</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container main-content">
+    <!-- Persistent Search Bar Section -->
+    <section id="searchHero" class="search-hero">
+      <div class="hero-copy" id="heroCopy">
+        <h1>Her ürün için kargo dahil gerçek en ucuz fiyatı bulun.</h1>
+        <p class="hero-subtitle">
+          Trendyol, Hepsiburada, Amazon TR, n11, Pazarama, idefix ve 50+ mağazadaki teklifleri anlık tarar;
+          kargo maliyetini ekler, birim fiyatı hesaplar ve 6 aylık fiyat geçmişine göre <strong>"şimdi alınır mı?"</strong> analizi çıkarır.
+        </p>
+      </div>
+
+      <form id="searchForm" class="search-form" autocomplete="off">
+        <div class="search-input-wrap">
+          <span class="search-icon" aria-hidden="true">
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+          </span>
+          <input
+            type="text"
+            id="searchInput"
+            class="search-input"
+            placeholder="Ürün adı, model kodu veya Akakçe ürün linki yazın (örn. Philips Airfryer, Lavazza 1 kg)..."
+            aria-label="Ürün ara"
+            required
+          />
+          <button type="button" id="clearSearchBtn" class="clear-btn" aria-label="Aramayı temizle" hidden>&times;</button>
+          <ul id="suggestList" class="suggest-list" role="listbox" hidden></ul>
+        </div>
+        <button type="submit" id="searchSubmitBtn" class="btn btn-primary btn-lg">Fiyat Araştır</button>
+      </form>
+
+      <div class="quick-queries" id="quickQueries">
+        <span class="quick-label">Hızlı dene:</span>
+        <button type="button" class="chip" data-query="iPhone 15 128 GB">iPhone 15 128 GB</button>
+        <button type="button" class="chip" data-query="Philips Airfryer XXL">Philips Airfryer XXL</button>
+        <button type="button" class="chip" data-query="Lavazza kahve 1 kg">Lavazza Kahve 1 kg</button>
+        <button type="button" class="chip" data-query="Dyson V15 Detect">Dyson V15 Detect</button>
+        <button type="button" class="chip" data-query="PlayStation 5 Slim">PlayStation 5 Slim</button>
+        <button type="button" class="chip" data-query="Prima bebek bezi">Prima Bebek Bezi</button>
+      </div>
+    </section>
+
+    <!-- Status / Error / Loading Banner -->
+    <div id="statusBanner" class="status-banner" role="status" hidden></div>
+
+    <!-- VIEW 1: Search Results -->
+    <section id="viewSearch" class="view-section" hidden>
+      <div class="results-toolbar">
+        <div class="results-meta">
+          <h2 id="resultsHeading">Arama Sonuçları</h2>
+          <span id="resultsSubmeta" class="muted-text"></span>
+        </div>
+
+        <div class="toolbar-controls">
+          <div class="price-range-group">
+            <input type="number" id="filterMinPrice" class="input-sm" placeholder="Min TL" min="0" aria-label="Minimum fiyat" />
+            <span class="range-sep">–</span>
+            <input type="number" id="filterMaxPrice" class="input-sm" placeholder="Max TL" min="0" aria-label="Maksimum fiyat" />
+            <button type="button" id="applyPriceFilterBtn" class="btn btn-secondary btn-sm">Filtrele</button>
+          </div>
+
+          <select id="searchSortSelect" class="select-sm" aria-label="Sıralama">
+            <option value="relevance">Sıralama: Alaka Düzeyi</option>
+            <option value="price_asc">En Ucuz Fiyat</option>
+            <option value="unit_asc">En Ucuz Birim Fiyat (TL/kg, lt, adet)</option>
+            <option value="offers_desc">En Çok Satıcılı</option>
+            <option value="price_desc">En Yüksek Fiyat</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="resultsGrid" class="results-grid"></div>
+    </section>
+
+    <!-- VIEW 2: Deep Product Analysis -->
+    <section id="viewDetail" class="view-section" hidden>
+      <div class="detail-top-bar">
+        <button type="button" id="backToResultsBtn" class="btn btn-ghost btn-sm">
+          &larr; Arama Sonuçlarına Dön
+        </button>
+        <div class="detail-actions">
+          <button type="button" id="detailShareBtn" class="btn btn-secondary btn-sm">Paylaş</button>
+          <button type="button" id="detailCompareToggleBtn" class="btn btn-secondary btn-sm">+ Karşılaştır</button>
+          <button type="button" id="detailRefreshBtn" class="btn btn-secondary btn-sm">Yenile</button>
+          <button type="button" id="exportCsvBtn" class="btn btn-secondary btn-sm">CSV</button>
+          <button type="button" id="exportJsonBtn" class="btn btn-secondary btn-sm">JSON</button>
+          <button type="button" id="printReportBtn" class="btn btn-secondary btn-sm hide-mobile">Yazdır</button>
+        </div>
+      </div>
+
+      <div id="detailContainer"></div>
+    </section>
+
+    <!-- VIEW 3: Side-by-Side Comparison -->
+    <section id="viewCompare" class="view-section" hidden>
+      <div class="section-header">
+        <div>
+          <h2>Çoklu Ürün Karşılaştırma</h2>
+          <p class="muted-text">En fazla 4 ürünü net fiyat, birim maliyet, 6 aylık dip fiyat ve teknik özellikler açısından yan yana inceleyin.</p>
+        </div>
+        <div class="section-actions">
+          <button type="button" id="runCompareBtn" class="btn btn-primary btn-sm" hidden>Seçilenleri Analiz Et</button>
+          <button type="button" id="clearCompareBtn" class="btn btn-ghost btn-sm" hidden>Listeyi Temizle</button>
+        </div>
+      </div>
+      <div id="compareBasketBar" class="compare-basket-bar"></div>
+      <div id="compareResultContainer"></div>
+    </section>
+
+    <!-- VIEW 4: Watchlist & Target Price Tracker -->
+    <section id="viewWatchlist" class="view-section" hidden>
+      <div class="section-header">
+        <div>
+          <h2>Takip Listem & Hedef Fiyat Alarmları</h2>
+          <p class="muted-text">Kaydettiğiniz ürünlerin canlı net fiyatlarını tek tıkla kontrol edin; hedef fiyatınıza düşen fırsatlar anında öne çıkar.</p>
+        </div>
+        <div class="section-actions">
+          <button type="button" id="refreshWatchlistBtn" class="btn btn-primary btn-sm">Tüm Fiyatları Canlı Güncelle</button>
+        </div>
+      </div>
+      <div id="watchlistContainer"></div>
+    </section>
+
+    <!-- VIEW 5: Search History -->
+    <section id="viewHistory" class="view-section" hidden>
+      <div class="section-header">
+        <div>
+          <h2>Son Aramalar</h2>
+          <p class="muted-text">Önceki ürün araştırmalarınıza tek tıkla geri dönün.</p>
+        </div>
+        <div class="section-actions">
+          <button type="button" id="clearHistoryBtn" class="btn btn-ghost btn-sm">Geçmişi Temizle</button>
+        </div>
+      </div>
+      <div id="historyContainer"></div>
+    </section>
+  </main>
+
+  <!-- iOS Safari Install Guide Banner (shown only on iPhone/iPad Safari outside standalone mode) -->
+  <div id="iosInstallBanner" class="ios-install-banner" hidden>
+    <div class="ios-install-inner">
+      <img src="/icons/apple-touch-icon.png" alt="FiyatRadar" class="ios-install-icon" />
+      <div class="ios-install-copy">
+        <strong>iPhone Uygulaması Olarak Yükle</strong>
+        <span>Safari alt menüsünden <strong>Paylaş (↑)</strong> → <strong>Ana Ekrana Ekle</strong> dokunun.</span>
+      </div>
+      <button type="button" id="dismissIosBannerBtn" class="ios-install-close" aria-label="Kapat">&times;</button>
+    </div>
+  </div>
+
+  <!-- Floating Compare Drawer (when user adds items during search) -->
+  <div id="floatingCompareBar" class="floating-compare" hidden>
+    <div class="floating-compare-inner">
+      <div class="floating-compare-text">
+        <strong id="floatingCompareCount">0 ürün</strong> karşılaştırma listesinde
+      </div>
+      <div class="floating-compare-actions">
+        <button type="button" id="floatingClearBtn" class="btn btn-ghost btn-sm">Temizle</button>
+        <button type="button" id="floatingOpenBtn" class="btn btn-primary btn-sm">Kıyasla</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Native iOS Bottom Tab Bar (visible on mobile <= 768px) -->
+  <nav id="mobileTabBar" class="mobile-tab-bar" aria-label="Mobil alt gezinme">
+    <button type="button" class="mobile-tab active" data-view="search">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="11" cy="11" r="7"></circle>
+        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+      </svg>
+      <span>Araştır</span>
+    </button>
+    <button type="button" class="mobile-tab" data-view="compare">
+      <span class="mobile-tab-icon-wrap">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="4" width="7" height="16" rx="1.5"></rect>
+          <rect x="14" y="4" width="7" height="16" rx="1.5"></rect>
+        </svg>
+        <span id="mobileCompareBadge" class="mobile-badge" hidden>0</span>
+      </span>
+      <span>Kıyasla</span>
+    </button>
+    <button type="button" class="mobile-tab" data-view="watchlist">
+      <span class="mobile-tab-icon-wrap">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"></path>
+          <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+        </svg>
+        <span id="mobileWatchlistBadge" class="mobile-badge" hidden>0</span>
+      </span>
+      <span>Takip</span>
+    </button>
+    <button type="button" class="mobile-tab" data-view="history">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="9"></circle>
+        <polyline points="12 7 12 12 15.5 14"></polyline>
+      </svg>
+      <span>Geçmiş</span>
+    </button>
+  </nav>
+
+  <!-- Toast notification -->
+  <div id="toast" class="toast" role="alert" aria-live="polite" hidden></div>
+
+  <footer class="footer">
+    <div class="container footer-inner">
+      <span><strong>FiyatRadar</strong> — Kargo dahil net maliyet, birim fiyat ve 6 aylık piyasa analiz botu.</span>
+      <span class="muted-text">Veriler canlı olarak Türkiye e-ticaret mağazalarından derlenir; satın almadan önce mağaza sayfasındaki son fiyatı doğrulayın.</span>
+    </div>
+  </footer>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
