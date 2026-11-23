@@ -62,28 +62,44 @@ const OFFICIAL_SELLER_KEYWORDS = [
 ];
 
 /**
- * Parses Turkish formatted price strings like "54.999,00 TL", "+44,99 TL kargo", "717,80".
+ * Parses Turkish and Google/US formatted price strings like
+ * "54.999,00 TL", "₺54,999.00", "TRY 54,999.00", "+44,99 TL kargo", "717,80", "2.490 TL".
  * @param {string|number|null|undefined} raw
  * @returns {number|null}
  */
 export function parseTrPrice(raw) {
   if (typeof raw === "number" && Number.isFinite(raw)) {
-    return raw;
+    return Math.round(raw * 100) / 100;
   }
   if (!raw || typeof raw !== "string") return null;
 
-  // Extract first Turkish-style numeric token: digits with optional dot thousands and comma decimals
   const cleaned = raw.replace(/\s+/g, " ").trim();
-  const match = cleaned.match(/(\d{1,3}(?:\.\d{3})+,\d{1,2}|\d+,\d{1,2}|\d{1,3}(?:\.\d{3})+|\d+(?:\.\d{1,2})?)/);
+  const match = cleaned.match(/(\d[\d.,]*)/);
   if (!match) return null;
 
-  let token = match[1];
-  if (token.includes(",")) {
-    // Turkish format: dots are thousands separators, comma is decimal separator
-    token = token.replace(/\./g, "").replace(",", ".");
-  } else if (/^\d{1,3}(\.\d{3})+$/.test(token)) {
-    // Dot-separated thousands without decimals (e.g., "54.999")
-    token = token.replace(/\./g, "");
+  let token = match[1].replace(/[.,]+$/, "");
+  if (!token) return null;
+
+  const hasDot = token.includes(".");
+  const hasComma = token.includes(",");
+
+  if (hasDot && hasComma) {
+    // Whichever separator appears last is the decimal separator
+    if (token.lastIndexOf(",") > token.lastIndexOf(".")) {
+      token = token.replace(/\./g, "").replace(",", ".");
+    } else {
+      token = token.replace(/,/g, "");
+    }
+  } else if (hasComma) {
+    if (/^\d{1,3}(,\d{3})+$/.test(token)) {
+      token = token.replace(/,/g, "");
+    } else {
+      token = token.replace(",", ".");
+    }
+  } else if (hasDot) {
+    if (/^\d{1,3}(\.\d{3})+$/.test(token)) {
+      token = token.replace(/\./g, "");
+    }
   }
 
   const val = Number.parseFloat(token);

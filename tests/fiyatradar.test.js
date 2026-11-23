@@ -10,15 +10,51 @@ import {
 } from "../src/parsers.js";
 import { analyzeOffers, analyzePriceHistory } from "../src/analyzer.js";
 import { getProductDetail, searchProducts } from "../src/scraper.js";
-import { getVirtualDetail, searchOfficialFallback } from "../src/providers.js";
+import {
+  extractOrganicPriceInfo,
+  getVirtualDetail,
+  resolveStoreFromUrl,
+  searchOfficialFallback,
+} from "../src/providers.js";
 
-test("parseTrPrice handles Turkish formatted currency strings accurately", () => {
+test("parseTrPrice handles both Turkish and Google/US formatted currency strings accurately", () => {
   assert.equal(parseTrPrice("54.999,00 TL"), 54999);
+  assert.equal(parseTrPrice("₺54,999.00"), 54999);
+  assert.equal(parseTrPrice("TRY 54,999.00"), 54999);
   assert.equal(parseTrPrice("55.377,24 TL"), 55377.24);
+  assert.equal(parseTrPrice("1,299.90 ₺"), 1299.9);
+  assert.equal(parseTrPrice("1.990,00 TL"), 1990);
+  assert.equal(parseTrPrice("2.490 TL"), 2490);
   assert.equal(parseTrPrice("+44,99 TL kargo"), 44.99);
   assert.equal(parseTrPrice("717,80 TL"), 717.8);
   assert.equal(parseTrPrice("6.900 TL"), 6900);
   assert.equal(parseTrPrice(""), null);
+});
+
+test("extractOrganicPriceInfo extracts TL prices, installment totals, and shipping from Google TR snippets", () => {
+  const s1 = extractOrganicPriceInfo({
+    title: "Kadın Topuklu Ayakkabı | Stradivarius Türkiye",
+    snippet: "Metal detaylı topuklu ayakkabı. 1.990,00 TL. Night Out.",
+  });
+  assert.equal(s1.price, 1990);
+
+  const s2 = extractOrganicPriceInfo({
+    title: "Stradivarius Basic topuklu ayakkabı - Trendyol",
+    snippet: "Stradivarius Basic topuklu ayakkabı. Peşin Fiyatına 3 Taksit. 3x 596,67 TL. 4.6.",
+  });
+  assert.equal(s2.price, 1790.01);
+  assert.equal(s2.source, "installment");
+
+  const s3 = extractOrganicPriceInfo({
+    title: "Apple iPhone 17 256GB Siyah - Trendyol",
+    snippet: "500 TL üzeri kargo bedava! Kargo Bedava. 115.698,70 TL",
+  });
+  assert.equal(s3.price, 115698.7);
+  assert.equal(s3.shipping.isFree, true);
+
+  assert.equal(resolveStoreFromUrl("https://www.stradivarius.com/tr/kadin/topuklu").platform, "Stradivarius");
+  assert.equal(resolveStoreFromUrl("https://www.trendyol.com/apple/iphone-17").platform, "Trendyol");
+  assert.equal(resolveStoreFromUrl("https://www.amazon.com.tr/dp/B001").platform, "Amazon Türkiye");
 });
 
 test("parseShipping distinguishes free vs paid shipping", () => {

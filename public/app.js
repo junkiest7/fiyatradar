@@ -411,19 +411,25 @@ function renderSearchResults() {
   els.resultsGrid.innerHTML = data.products
     .map((p) => {
       const inCompare = state.compareBasket.some((c) => c.url === p.url);
+      const isCatalogOnly = !p.lowestPrice && Boolean(p.externalUrl);
       return `
         <article class="product-card" data-url="${esc(p.url)}">
           <div class="product-card-media" data-action="open-detail">
             ${p.image ? `<img src="${esc(p.image)}" alt="${esc(p.title)}" loading="lazy" />` : `<span class="muted-text">Görsel yok</span>`}
           </div>
+          ${p.badge ? `<span class="offer-pill" style="align-self:flex-start;">${esc(p.badge)}</span>` : ""}
           <h3 class="product-card-title" data-action="open-detail" title="${esc(p.title)}">${esc(p.title)}</h3>
           ${p.unitInfo ? `<div class="unit-pill" title="Otomatik birim maliyet (${esc(p.unitInfo.rawMatch)})">${esc(p.unitInfo.formatted)}</div>` : ""}
           <div class="product-card-pricing">
-            <span class="price-main">${p.lowestPrice ? fmtTL(p.lowestPrice) : "Fiyat yok"}</span>
-            <span class="offer-pill">${p.offerCount > 1 ? `${p.offerCount} satıcı` : "1 satıcı"}</span>
+            <span class="price-main">${p.lowestPrice ? fmtTL(p.lowestPrice) : "Mağazada Gör"}</span>
+            <span class="offer-pill">${p.offerCount > 1 ? `${p.offerCount} satıcı` : p.source ? esc(p.source) : "1 satıcı"}</span>
           </div>
           <div class="product-card-footer">
-            <button type="button" class="btn btn-primary btn-sm btn-analyze" data-action="open-detail">Detaylı Analiz</button>
+            ${
+              isCatalogOnly
+                ? `<a href="${esc(p.externalUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm btn-analyze">Mağazada Aç ↗</a>`
+                : `<button type="button" class="btn btn-primary btn-sm btn-analyze" data-action="open-detail">Detaylı Analiz</button>`
+            }
             <button type="button" class="btn btn-secondary btn-sm btn-compare-toggle ${inCompare ? "selected" : ""}" data-action="toggle-compare" title="Karşılaştırma listesine ekle/çıkar">
               ${inCompare ? "✓ Listede" : "+ Kıyasla"}
             </button>
@@ -1694,9 +1700,37 @@ function bindEvents() {
     if (state.lastQuery) performSearch(state.lastQuery, { refresh: true });
   });
 
+  $("testApiKeyBtn")?.addEventListener("click", async () => {
+    const key = (els.serperKeyInput?.value || "").trim();
+    const statusEl = $("settingsTestStatus");
+    if (!statusEl) return;
+    statusEl.hidden = false;
+    statusEl.style.color = "var(--ink-secondary)";
+    statusEl.textContent = "Serper bağlantısı test ediliyor...";
+    try {
+      const res = await fetch("/api/providers/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ serperKey: key }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "Doğrulama başarısız");
+      statusEl.style.color = "var(--good)";
+      statusEl.textContent = `✓ Bağlantı başarılı! Google Türkiye araması çalışıyor (${data.sampleCount} test sonucu alındı). Şimdi "Kaydet ve Aktifleştir"e dokunun.`;
+    } catch (err) {
+      statusEl.style.color = "var(--bad)";
+      statusEl.textContent = `✗ ${err.message}`;
+    }
+  });
+
   els.clearApiKeysBtn?.addEventListener("click", () => {
     if (els.serperKeyInput) els.serperKeyInput.value = "";
     if (els.serpApiKeyInput) els.serpApiKeyInput.value = "";
+    const statusEl = $("settingsTestStatus");
+    if (statusEl) {
+      statusEl.hidden = true;
+      statusEl.textContent = "";
+    }
     try {
       localStorage.removeItem("fiyatradar_serper_key");
       localStorage.removeItem("fiyatradar_serpapi_key");
@@ -1713,6 +1747,8 @@ function openSettingsModal() {
   const { serperKey, serpApiKey } = getStoredApiKeys();
   if (els.serperKeyInput) els.serperKeyInput.value = serperKey;
   if (els.serpApiKeyInput) els.serpApiKeyInput.value = serpApiKey;
+  const statusEl = $("settingsTestStatus");
+  if (statusEl) statusEl.hidden = true;
   els.settingsModal.hidden = false;
 }
 

@@ -22,6 +22,7 @@ import {
   updateWatchlistTarget,
   upsertWatchlistItem,
 } from "./db.js";
+import { testSerperKey } from "./providers.js";
 import { formatTrNumber } from "./parsers.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -64,6 +65,20 @@ app.get("/api/providers", (req, res) => {
     clientSerper: hasClientSerper,
     clientSerpApi: hasClientSerpApi,
   });
+});
+
+// Live Serper API key verification endpoint
+app.post("/api/providers/test", async (req, res) => {
+  try {
+    const key = String(req.body?.serperKey || req.headers["x-serper-key"] || process.env.SERPER_API_KEY || "").trim();
+    if (!key) {
+      return res.status(400).json({ ok: false, error: "Test etmek için bir Serper API anahtarı girin." });
+    }
+    const result = await testSerperKey(key);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
 });
 
 // Live Turkish autocomplete suggestions

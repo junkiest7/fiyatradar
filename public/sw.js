@@ -1,9 +1,10 @@
 /**
- * FiyatRadar Service Worker
- * App-shell caching for fast iPhone standalone launch + graceful offline handling.
+ * FiyatRadar Service Worker (v4)
+ * Network-first for app shell so iPhone PWA always gets instant updates,
+ * with cache fallback when offline.
  */
 
-const CACHE_NAME = "fiyatradar-v3";
+const CACHE_NAME = "fiyatradar-v4";
 const SHELL_ASSETS = [
   "/",
   "/index.html",
@@ -44,7 +45,7 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
 
-  // API requests: Network-first so live prices are always fresh
+  // API requests: Network-only with graceful offline JSON
   if (url.pathname.startsWith("/api/")) {
     event.respondWith(
       fetch(req).catch(
@@ -64,20 +65,16 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // App shell static assets: Stale-while-revalidate for instant iPhone launch
+  // Static app shell: Network-first so iPhone PWA immediately loads new updates
   event.respondWith(
-    caches.match(req).then((cached) => {
-      const networkFetch = fetch(req)
-        .then((res) => {
-          if (res && res.status === 200 && res.type === "basic") {
-            const clone = res.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(req, clone));
-          }
-          return res;
-        })
-        .catch(() => cached);
-
-      return cached || networkFetch;
-    })
+    fetch(req)
+      .then((res) => {
+        if (res && res.status === 200 && res.type === "basic") {
+          const clone = res.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(req, clone));
+        }
+        return res;
+      })
+      .catch(() => caches.match(req))
   );
 });

@@ -18,8 +18,8 @@ import { analyzeOffers, analyzePriceHistory } from "./analyzer.js";
 import {
   getVirtualDetail,
   searchOfficialFallback,
-  searchSerpApiShopping,
-  searchSerperShopping,
+  searchSerpApiTurkey,
+  searchSerperTurkey,
 } from "./providers.js";
 
 const BASE_URL = "https://www.akakce.com";
@@ -168,26 +168,26 @@ export async function searchProducts(query, options = {}) {
     };
   }
 
-  // Priority 1: Official Google Shopping TR via Serper.dev (cloud-proof, 50+ TR stores)
+  // Priority 1: Google Türkiye Search via Serper.dev (works for ALL Turkish stores incl. fashion & electronics!)
   if (serperKey) {
-    const cKey = `serper:${q.toLocaleLowerCase("tr-TR")}`;
+    const cKey = `serper-tr:${q.toLocaleLowerCase("tr-TR")}`;
     if (!options.refresh) {
       const cached = getCached(cKey);
       if (cached) return { ...cached, cached: true };
     }
-    const result = await searchSerperShopping(q, serperKey);
+    const result = await searchSerperTurkey(q, serperKey);
     setCached(cKey, result, SEARCH_TTL_MS);
     return result;
   }
 
-  // Priority 2: Official Google Shopping TR via SerpAPI
+  // Priority 2: Google Türkiye Search via SerpAPI
   if (serpApiKey) {
-    const cKey = `serpapi:${q.toLocaleLowerCase("tr-TR")}`;
+    const cKey = `serpapi-tr:${q.toLocaleLowerCase("tr-TR")}`;
     if (!options.refresh) {
       const cached = getCached(cKey);
       if (cached) return { ...cached, cached: true };
     }
-    const result = await searchSerpApiShopping(q, serpApiKey);
+    const result = await searchSerpApiTurkey(q, serpApiKey);
     setCached(cKey, result, SEARCH_TTL_MS);
     return result;
   }

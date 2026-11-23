@@ -1,8 +1,12 @@
 /**
  * Cloud-proof Turkish e-commerce data providers:
- * 1. Serper.dev Google Shopping Türkiye (Official REST API, 2,500 free queries — covers ALL 50+ TR stores)
- * 2. SerpAPI Google Shopping Türkiye (Official REST API, 100 free/mo — covers ALL 50+ TR stores)
- * 3. T.C. Ticaret Bakanlığı / TÜBİTAK Market Fiyatı API (Zero-key official API: A101, BİM, CarrefourSA, Migros, ŞOK, Hakmar, Tarım Kredi)
+ * 1. Serper.dev Google Türkiye Search (/search with gl:"tr", hl:"tr")
+ *    NOTE: Google Shopping (/shopping) was disabled in Turkey in 2020 by Rekabet Kurumu,
+ *    so /search organic + rich product snippets (price, priceRange, rating, TL snippets)
+ *    across Trendyol, Hepsiburada, Amazon TR, Stradivarius, Zara, Boyner, n11, Akakçe,
+ *    Cimri, MediaMarkt, Teknosa, Vatan, etc. is the reliable Turkey engine!
+ * 2. SerpAPI Google Türkiye Search (engine=google, gl=tr, hl=tr)
+ * 3. T.C. Ticaret Bakanlığı / TÜBİTAK Market Fiyatı API (Zero-key official API)
  * 4. Migros Elektronik & Sanal Market REST API (Zero-key official JSON API)
  */
 
@@ -28,6 +32,104 @@ const MARKET_NAMES = {
   tarim_kredi: "Tarım Kredi Kooperatif",
 };
 
+const DOMAIN_STORE_MAP = [
+  ["trendyol.com", "Trendyol"],
+  ["hepsiburada.com", "Hepsiburada"],
+  ["amazon.com.tr", "Amazon Türkiye"],
+  ["n11.com", "n11"],
+  ["pazarama.com", "Pazarama"],
+  ["idefix.com", "idefix"],
+  ["pttavm.com", "PttAVM"],
+  ["mediamarkt.com.tr", "MediaMarkt"],
+  ["teknosa.com", "Teknosa"],
+  ["vatanbilgisayar.com", "Vatan Bilgisayar"],
+  ["akakce.com", "Akakçe"],
+  ["cimri.com", "Cimri"],
+  ["epey.com", "Epey"],
+  ["migros.com.tr", "Migros"],
+  ["carrefoursa.com", "CarrefourSA"],
+  ["a101.com.tr", "A101"],
+  ["bim.com.tr", "BİM"],
+  ["sokmarket.com.tr", "ŞOK Market"],
+  ["ciceksepeti.com", "Çiçeksepeti"],
+  ["stradivarius.com", "Stradivarius"],
+  ["zara.com", "Zara"],
+  ["mango.com", "Mango"],
+  ["bershka.com", "Bershka"],
+  ["pullandbear.com", "Pull&Bear"],
+  ["massimodutti.com", "Massimo Dutti"],
+  ["oysho.com", "Oysho"],
+  ["hm.com", "H&M"],
+  ["boyner.com.tr", "Boyner"],
+  ["beymen.com", "Beymen"],
+  ["vakko.com", "Vakko"],
+  ["flo.com.tr", "FLO"],
+  ["derimod.com.tr", "Derimod"],
+  ["hotic.com.tr", "Hotiç"],
+  ["desa.com.tr", "Desa"],
+  ["elle.com.tr", "Elle Shoes"],
+  ["inci.com.tr", "İnci"],
+  ["lcw.com", "LC Waikiki"],
+  ["lcwaikiki.com", "LC Waikiki"],
+  ["koton.com", "Koton"],
+  ["defacto.com.tr", "DeFacto"],
+  ["mavi.com", "Mavi"],
+  ["ipekyol.com.tr", "İpekyol"],
+  ["network.com.tr", "NetWork"],
+  ["nike.com", "Nike Türkiye"],
+  ["adidas.com.tr", "Adidas Türkiye"],
+  ["puma.com", "Puma Türkiye"],
+  ["superstep.com.tr", "SuperStep"],
+  ["sneaksup.com", "Sneaks Up"],
+  ["decathlon.com.tr", "Decathlon"],
+  ["dr.com.tr", "D&R"],
+  ["koctas.com.tr", "Koçtaş"],
+  ["ikea.com.tr", "IKEA Türkiye"],
+  ["dyson.com.tr", "Dyson Türkiye"],
+  ["apple.com", "Apple Türkiye"],
+  ["samsung.com", "Samsung Türkiye"],
+  ["philips.com.tr", "Philips Türkiye"],
+  ["karaca.com", "Karaca"],
+  ["korkmazstore.com.tr", "Korkmaz"],
+  ["englishhome.com", "English Home"],
+  ["madamecoco.com", "Madame Coco"],
+  ["sephora.com.tr", "Sephora"],
+  ["watsons.com.tr", "Watsons"],
+  ["gratis.com", "Gratis"],
+  ["itopya.com", "İtopya"],
+  ["incehesap.com", "İncehesap"],
+  ["sinerji.gen.tr", "Sinerji"],
+  ["gaming.gen.tr", "Gaming.Gen.TR"],
+  ["gurgencler.com.tr", "Gürgençler"],
+  ["troyestore.com", "Troy"],
+  ["pt.com.tr", "Pozitif Teknoloji"],
+  ["turkcell.com.tr", "Turkcell Pasaj"],
+  ["vodafone.com.tr", "Vodafone"],
+  ["ebek.com", "ebebek"],
+  ["ebebek.com", "ebebek"],
+  ["civilim.com", "Civil"],
+  ["dolap.com", "Dolap"],
+  ["gardrops.com", "Gardrops"],
+  ["sahibinden.com", "sahibinden"],
+];
+
+// Non-shopping informational / social domains to exclude from store offers
+const NON_SHOPPING_DOMAINS = [
+  "youtube.com",
+  "youtu.be",
+  "instagram.com",
+  "facebook.com",
+  "tiktok.com",
+  "twitter.com",
+  "x.com",
+  "reddit.com",
+  "eksisozluk.com",
+  "wikipedia.org",
+  "pinterest.com",
+  "linkedin.com",
+  "sikayetvar.com",
+];
+
 // In-memory store for detail views of non-Akakce provider products
 const virtualDetailCache = new Map();
 
@@ -36,7 +138,7 @@ function saveVirtualDetail(key, payload) {
     const first = virtualDetailCache.keys().next().value;
     virtualDetailCache.delete(first);
   }
-  virtualDetailCache.set(key, { payload, expiresAt: Date.now() + 20 * 60 * 1000 });
+  virtualDetailCache.set(key, { payload, expiresAt: Date.now() + 30 * 60 * 1000 });
 }
 
 export function getVirtualDetail(key) {
@@ -50,105 +152,374 @@ export function getVirtualDetail(key) {
 }
 
 /**
- * Provider 1: Google Shopping Türkiye via Serper.dev (POST https://google.serper.dev/shopping)
- * Returns live offers across Trendyol, Hepsiburada, Amazon TR, n11, Pazarama, idefix,
- * MediaMarkt, Teknosa, Vatan, Migros, PttAVM, Akakçe, etc.
+ * Resolves Turkish store name & favicon from any product URL.
  */
-export async function searchSerperShopping(query, apiKey) {
-  const res = await fetch("https://google.serper.dev/shopping", {
+export function resolveStoreFromUrl(urlStr, fallbackSource = "") {
+  let host = "";
+  try {
+    host = new URL(urlStr).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    host = "";
+  }
+
+  for (const [domain, label] of DOMAIN_STORE_MAP) {
+    if (host === domain || host.endsWith(`.${domain}`)) {
+      return {
+        platform: label,
+        host,
+        logoUrl: host ? `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64` : null,
+      };
+    }
+  }
+
+  const prettyHost = fallbackSource || (host ? host.split(".")[0].replace(/^./, (c) => c.toUpperCase()) : "Mağaza");
+  return {
+    platform: prettyHost,
+    host,
+    logoUrl: host ? `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64` : null,
+  };
+}
+
+function isNonShoppingUrl(urlStr) {
+  try {
+    const host = new URL(urlStr).hostname.replace(/^www\./i, "").toLowerCase();
+    return NON_SHOPPING_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Extracts live TL price & shipping cues from Google Turkey organic/rich result objects.
+ * Handles:
+ * - Structured rich result fields (item.price, item.priceRange, item.attributes)
+ * - Turkish TL/₺ prices in snippet/title ("1.990,00 TL", "₺54.999", "81.997,26 TL", "2.490 TL")
+ * - Installment patterns ("3x 596,67 TL" -> 1.790,01 TL when no direct cash price exists)
+ * - Avoids mistaking shipping thresholds ("500 TL üzeri kargo bedava") or shipping fees ("+44,99 TL kargo") for product prices
+ */
+export function extractOrganicPriceInfo(item) {
+  const snippet = String(item?.snippet || "");
+  const title = String(item?.title || "");
+  const attrText = item?.attributes && typeof item.attributes === "object"
+    ? Object.entries(item.attributes).map(([k, v]) => `${k}: ${v}`).join(" · ")
+    : "";
+  const combinedText = `${title} | ${attrText} | ${snippet}`;
+
+  // 1. Detect shipping cues in text
+  let shipping = { cost: 0, isFree: false, label: "Mağazada kontrol edin", unknown: true };
+  if (/ücretsiz\s+kargo|kargo\s+bedava|bedava\s+kargo|kargo\s+dahil/i.test(combinedText)) {
+    shipping = { cost: 0, isFree: true, label: "Ücretsiz kargo", unknown: false };
+  } else {
+    const shipCostMatch = combinedText.match(/\+?\s*(\d{1,3}(?:[.,]\d{1,2})?)\s*(?:TL|₺)\s*kargo/i);
+    if (shipCostMatch) {
+      const sc = parseTrPrice(shipCostMatch[1]);
+      if (sc !== null && sc > 0 && sc < 2000) {
+        shipping = parseShipping(`+${shipCostMatch[1]} TL kargo`);
+      }
+    }
+  }
+
+  // 2. Check structured rich fields first (Google rich product schema parsed by Serper/SerpAPI)
+  const currencyRaw = String(item?.currency || "").toUpperCase();
+  const isForeignCurrency =
+    currencyRaw && !["TRY", "TL", "₺"].includes(currencyRaw) && /USD|\$|EUR|€|GBP|£/.test(currencyRaw);
+
+  if (!isForeignCurrency) {
+    if (typeof item?.price === "number" && item.price > 0) {
+      return { price: Math.round(item.price * 100) / 100, shipping, source: "rich" };
+    }
+    if (typeof item?.price === "string" && item.price.trim()) {
+      const p = parseTrPrice(item.price);
+      if (p && p > 0) return { price: p, shipping, source: "rich" };
+    }
+    if (typeof item?.priceRange === "string" && item.priceRange.trim()) {
+      const p = parseTrPrice(item.priceRange);
+      if (p && p > 0) return { price: p, shipping, source: "range" };
+    }
+  }
+
+  // 3. Scan snippet + attributes + title for TL / ₺ prices
+  const directCandidates = [];
+  const installmentCandidates = [];
+
+  // Pattern A: optional "3x " + number + " TL / ₺ / TRY"
+  const afterRe = /(?:(\d{1,2})\s*[x×]\s*)?(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺|TRY)(?![a-zA-ZğüşıöçĞÜŞİÖÇ])/gi;
+  for (const m of combinedText.matchAll(afterRe)) {
+    const val = parseTrPrice(m[2]);
+    if (!val || val < 10) continue;
+    const afterCtx = combinedText.slice((m.index || 0) + m[0].length, (m.index || 0) + m[0].length + 26).toLowerCase();
+    const beforeCtx = combinedText.slice(Math.max(0, (m.index || 0) - 24), m.index || 0).toLowerCase();
+
+    // Skip shipping fees, coupon discounts, free-shipping minimums
+    if (/^\s*(kargo|üzeri|üzerine|altı|indirim|kupon|puan|hediye|cashback|kazan)/i.test(afterCtx)) continue;
+    if (/(kargo|kupon|indirim|puan|hediye)\s*[:+]?\s*$/i.test(beforeCtx)) continue;
+
+    if (m[1]) {
+      const mul = Number.parseInt(m[1], 10);
+      if (mul >= 2 && mul <= 12) {
+        installmentCandidates.push(Math.round(val * mul * 100) / 100);
+        continue;
+      }
+    }
+    if (/taksit/i.test(afterCtx) && val < 2000) {
+      continue;
+    }
+    directCandidates.push(val);
+  }
+
+  // Pattern B: "₺1.990,00" or "TRY 54,999.00"
+  const beforeRe = /(?:₺|TRY)\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)/gi;
+  for (const m of combinedText.matchAll(beforeRe)) {
+    const val = parseTrPrice(m[1]);
+    if (!val || val < 10) continue;
+    directCandidates.push(val);
+  }
+
+  if (directCandidates.length > 0) {
+    return { price: directCandidates[0], shipping, source: "snippet" };
+  }
+  if (installmentCandidates.length > 0) {
+    return { price: installmentCandidates[0], shipping, source: "installment" };
+  }
+
+  return { price: null, shipping, source: "none" };
+}
+
+/**
+ * Provider 1: Serper.dev Google Türkiye Search Engine
+ * Uses /search (gl: "tr", hl: "tr") because Google Shopping (/shopping) is disabled in Turkey!
+ * Automatically extracts live prices, shipping, ratings, images, and store links across
+ * Trendyol, Hepsiburada, Amazon TR, Stradivarius, Zara, Boyner, n11, Akakçe, Cimri, MediaMarkt, etc.
+ */
+export async function searchSerperTurkey(query, apiKey) {
+  const callSerper = async (endpoint, body) => {
+    const res = await fetch(`https://google.serper.dev/${endpoint}`, {
+      method: "POST",
+      headers: {
+        "X-API-KEY": apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(12000),
+    });
+
+    if (!res.ok) {
+      const errTxt = await res.text().catch(() => "");
+      if (res.status === 401 || res.status === 403) {
+        throw new Error("Serper API anahtarı geçersiz veya kredi tükendi. Lütfen Ayarlar (⚙) menüsünden anahtarınızı kontrol edin.");
+      }
+      throw new Error(`Serper API yanıt hatası (HTTP ${res.status}): ${errTxt.slice(0, 120)}`);
+    }
+    return res.json();
+  };
+
+  // Query 1: Broad Turkish price search (captures official brand stores like Stradivarius, Zara, Apple + Trendyol/Hepsiburada/Akakce/Cimri)
+  const qWithPrice = /fiyat|tl\b/i.test(query) ? query : `${query} fiyat TL`;
+  const data1 = await callSerper("search", {
+    q: qWithPrice,
+    gl: "tr",
+    hl: "tr",
+    num: 20,
+  });
+
+  const organic1 = Array.isArray(data1.organic) ? data1.organic : [];
+  let combinedOrganic = [...organic1];
+
+  // Count how many priced items we got from call 1
+  const pricedCount1 = organic1.filter((it) => !isNonShoppingUrl(it.link) && extractOrganicPriceInfo(it).price !== null).length;
+
+  // Query 2 (only if < 5 priced results from query 1): targeted major TR marketplaces & price comparators
+  if (pricedCount1 < 5) {
+    try {
+      const data2 = await callSerper("search", {
+        q: `${query} fiyat (site:trendyol.com OR site:hepsiburada.com OR site:amazon.com.tr OR site:n11.com OR site:akakce.com OR site:cimri.com OR site:mediamarkt.com.tr OR site:teknosa.com OR site:pazarama.com)`,
+        gl: "tr",
+        hl: "tr",
+        num: 15,
+      });
+      if (Array.isArray(data2.organic)) {
+        combinedOrganic.push(...data2.organic);
+      }
+    } catch {
+      // Non-fatal; keep query 1 results
+    }
+  }
+
+  // Optional: If Serper also returned inline shopping results or images, capture them too!
+  const inlineImages = Array.isArray(data1.images) ? data1.images : [];
+  const defaultProductImage = inlineImages[0]?.imageUrl || "";
+
+  return buildTurkeySearchResponse(query, combinedOrganic, defaultProductImage, "Google Türkiye (Serper)", "serper");
+}
+
+/**
+ * Quick key validation helper for Settings modal ("Anahtarı Test Et").
+ */
+export async function testSerperKey(apiKey) {
+  const res = await fetch("https://google.serper.dev/search", {
     method: "POST",
     headers: {
       "X-API-KEY": apiKey,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      q: query,
-      gl: "tr",
-      hl: "tr",
-      num: 40,
-    }),
-    signal: AbortSignal.timeout(12000),
+    body: JSON.stringify({ q: "iphone fiyat", gl: "tr", hl: "tr", num: 5 }),
+    signal: AbortSignal.timeout(10000),
   });
-
   if (!res.ok) {
-    const errTxt = await res.text().catch(() => "");
-    throw new Error(`Google Shopping (Serper) yanıt hatası (HTTP ${res.status}): ${errTxt.slice(0, 120)}`);
+    const txt = await res.text().catch(() => "");
+    throw new Error(
+      res.status === 401 || res.status === 403
+        ? "Serper API anahtarı geçersiz veya yetkisiz."
+        : `Serper hata (HTTP ${res.status}): ${txt.slice(0, 100)}`
+    );
   }
-
   const data = await res.json();
-  const shopping = Array.isArray(data.shopping) ? data.shopping : [];
+  return {
+    ok: true,
+    creditsLeft: data.credits ?? null,
+    sampleCount: Array.isArray(data.organic) ? data.organic.length : 0,
+  };
+}
 
-  const offers = [];
+/**
+ * Provider 2: SerpAPI Google Türkiye Search
+ */
+export async function searchSerpApiTurkey(query, apiKey) {
+  const qWithPrice = /fiyat|tl\b/i.test(query) ? query : `${query} fiyat TL`;
+  const url = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(qWithPrice)}&gl=tr&hl=tr&num=20&api_key=${encodeURIComponent(apiKey)}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
+  if (!res.ok) {
+    throw new Error(`SerpAPI yanıt hatası (HTTP ${res.status})`);
+  }
+  const data = await res.json();
+  const organic = (Array.isArray(data.organic_results) ? data.organic_results : []).map((it) => ({
+    title: it.title,
+    link: it.link,
+    snippet: it.snippet || "",
+    imageUrl: it.thumbnail || "",
+    price: it.rich_snippet?.bottom?.detected_extensions?.price ?? it.rich_snippet?.top?.detected_extensions?.price,
+    currency: it.rich_snippet?.bottom?.detected_extensions?.currency ?? it.rich_snippet?.top?.detected_extensions?.currency,
+    rating: it.rich_snippet?.top?.detected_extensions?.rating ?? it.rich_snippet?.bottom?.detected_extensions?.rating,
+    ratingCount: it.rich_snippet?.top?.detected_extensions?.reviews ?? it.rich_snippet?.bottom?.detected_extensions?.reviews,
+  }));
+
+  return buildTurkeySearchResponse(query, organic, "", "Google Türkiye (SerpAPI)", "serpapi");
+}
+
+function buildTurkeySearchResponse(query, rawOrganic, fallbackImage, providerName, prefix) {
+  const seenUrls = new Set();
+  const pricedOffers = [];
+  const catalogLinks = [];
   const products = [];
 
-  shopping.forEach((item, idx) => {
-    const basePrice = parseTrPrice(item.price);
-    if (!basePrice || basePrice <= 0) return;
+  for (const item of rawOrganic) {
+    const link = item?.link;
+    const title = String(item?.title || "").replace(/\s+/g, " ").trim();
+    if (!link || !title || seenUrls.has(link) || isNonShoppingUrl(link)) continue;
+    seenUrls.add(link);
 
-    const deliveryRaw = item.delivery || "";
-    const shipping = parseShipping(deliveryRaw);
-    const store = parseStoreInfo(item.source || "", "");
+    const storeMeta = resolveStoreFromUrl(link, item.source || "");
+    const store = parseStoreInfo(storeMeta.platform, "");
+    const priceInfo = extractOrganicPriceInfo(item);
+    const snippet = String(item.snippet || "").replace(/\s+/g, " ").trim();
+    const delivery = parseDeliverySpeed(snippet);
+    const imgUrl = item.imageUrl || item.thumbnailUrl || "";
+
     if (typeof item.rating === "number" && item.rating > 0) {
-      // Convert 5-star rating to 10-point scale for unified UI display
       store.sellerRating = Math.round(item.rating * 2 * 10) / 10;
       store.sellerReviews = item.ratingCount ? `${item.ratingCount} yorum` : "";
     }
 
-    const offer = {
-      id: `serper-${idx + 1}`,
-      offerTitle: item.title || query,
-      basePrice,
-      shipping,
-      store,
-      storeLogo: null,
-      stockText: "Stokta",
-      inStock: true,
-      delivery: parseDeliverySpeed(deliveryRaw),
-      lastUpdated: "Canlı",
-      promoNote: item.offers ? String(item.offers) : "",
-      akakceBadge: "",
-      url: item.link || `https://www.google.com/search?tbm=shop&q=${encodeURIComponent(item.title || query)}`,
-      isDirectLink: Boolean(item.link),
-      image: item.imageUrl || "",
-    };
-    offers.push(offer);
+    const idx = pricedOffers.length + catalogLinks.length + 1;
+    const vKey = `virtual:${prefix}:${encodeURIComponent(query)}:${idx}`;
 
-    const vKey = `virtual:serper:${encodeURIComponent(query)}:${idx}`;
-    const unitInfo = extractUnitInfo(item.title || query, basePrice + shipping.cost);
-    products.push({
-      id: `sp-${idx + 1}`,
-      title: item.title || query,
-      url: vKey,
-      externalUrl: offer.url,
-      image: item.imageUrl || "",
-      lowestPrice: Math.round((basePrice + shipping.cost) * 100) / 100,
-      offerCount: 1,
-      badge: store.platform,
-      source: "Google Shopping TR",
-      unitInfo,
-    });
-  });
+    // Extract seller count hint from Akakce/Cimri snippets like "+150 FİYAT" or "19 satıcı"
+    const sellerCountMatch = snippet.match(/(?:\+(\d+)\s*FİYAT|(\d+)\s*satıcı)/i);
+    const offerCountHint = sellerCountMatch ? Number.parseInt(sellerCountMatch[1] || sellerCountMatch[2], 10) : 1;
 
-  // Build an aggregated multi-store comparison dossier for the full query!
-  const aggregateKey = `virtual:serper:all:${encodeURIComponent(query.toLocaleLowerCase("tr-TR"))}`;
-  const unitInfo = extractUnitInfo(query, offers[0]?.basePrice ?? null);
-  const analysis = analyzeOffers(offers, unitInfo);
+    if (priceInfo.price !== null && priceInfo.price > 0) {
+      const offer = {
+        id: `${prefix}-${idx}`,
+        offerTitle: title,
+        basePrice: priceInfo.price,
+        shipping: priceInfo.shipping,
+        store,
+        storeLogo: storeMeta.logoUrl,
+        stockText: /tükendi|stokta yok/i.test(snippet) ? "Stok kontrol edin" : "Stokta",
+        inStock: !/tükendi|stokta yok/i.test(snippet),
+        delivery,
+        lastUpdated: item.date || "Canlı Google TR",
+        promoNote: priceInfo.source === "installment" ? "Taksit tutarından hesaplandı" : snippet.slice(0, 110),
+        akakceBadge: "",
+        url: link,
+        isDirectLink: true,
+        image: imgUrl,
+      };
+      pricedOffers.push(offer);
+
+      const netEstimate = Math.round((priceInfo.price + priceInfo.shipping.cost) * 100) / 100;
+      const unitInfo = extractUnitInfo(title, netEstimate);
+
+      products.push({
+        id: `${prefix}-${idx}`,
+        title,
+        url: vKey,
+        externalUrl: link,
+        image: imgUrl || storeMeta.logoUrl || fallbackImage,
+        lowestPrice: netEstimate,
+        offerCount: offerCountHint,
+        badge: storeMeta.platform,
+        source: storeMeta.platform,
+        unitInfo,
+        _offer: offer,
+      });
+    } else {
+      // Unpriced store listing (e.g. Trendyol/Stradivarius category or product page without price in snippet)
+      catalogLinks.push({
+        id: `${prefix}-cat-${idx}`,
+        title,
+        url: link,
+        store: storeMeta.platform,
+        logoUrl: storeMeta.logoUrl,
+        image: imgUrl || storeMeta.logoUrl || fallbackImage,
+        snippet,
+      });
+    }
+  }
+
+  // Analyze all priced offers across all discovered Turkish stores
+  const unitInfoGlobal = extractUnitInfo(query, pricedOffers[0]?.basePrice ?? null);
+  const analysis = analyzeOffers(pricedOffers, unitInfoGlobal);
   const histAnalysis = analyzePriceHistory([], analysis.stats?.minNet ?? null);
 
+  const aggregateKey = `virtual:${prefix}:all:${encodeURIComponent(query.toLocaleLowerCase("tr-TR"))}`;
+  const bestImage =
+    pricedOffers.find((o) => o.image)?.image ||
+    catalogLinks.find((c) => c.image)?.image ||
+    fallbackImage;
+
+  const extraStoreVariants = catalogLinks.slice(0, 10).map((c) => ({
+    name: `${c.store} — ${c.title.slice(0, 56)}`,
+    price: null,
+    seller: c.store,
+    url: c.url,
+    isAkakceUrl: false,
+  }));
+
   const aggregateDetail = {
-    id: `gshop-${Date.now()}`,
-    title: `${query} — Tüm Türkiye Mağaza Teklifleri`,
+    id: `${prefix}-${Date.now()}`,
+    title: `${query} — Türkiye Mağaza Fiyat Karşılaştırması`,
     brand: "",
-    category: "Google Shopping Türkiye · Canlı Çoklu Mağaza Karşılaştırması",
-    description: `${query} araması için Google Shopping Türkiye üzerinden canlı derlenen ${offers.length} mağaza teklifi.`,
+    category: `${providerName} · Canlı Çoklu Mağaza Analizi`,
+    description: `${query} için Türkiye mağazalarından canlı derlenen ${pricedOffers.length} fiyatlı teklif ve ${catalogLinks.length} mağaza sayfası.`,
     url: aggregateKey,
-    image: offers.find((o) => o.image)?.image || "",
+    image: bestImage,
     rating: null,
-    totalOfferCount: offers.length,
-    unitInfo: unitInfo ? extractUnitInfo(query, analysis.stats?.minNet ?? offers[0]?.basePrice) : null,
+    totalOfferCount: pricedOffers.length,
+    unitInfo: unitInfoGlobal ? extractUnitInfo(query, analysis.stats?.minNet ?? pricedOffers[0]?.basePrice) : null,
     fetchedAt: new Date().toISOString(),
     cached: false,
-    provider: "Google Shopping TR (Serper)",
+    provider: providerName,
     lowPrice: analysis.stats?.minNet ?? null,
     highPrice: analysis.stats?.maxNet ?? null,
     stats: analysis.stats,
@@ -160,25 +531,31 @@ export async function searchSerperShopping(query, apiKey) {
     historySummary: null,
     verdict: {
       ...histAnalysis.verdict,
-      headline: `${offers.length} mağaza arasından kargo dahil en ucuz teklif ve fiyat dağılımı çıkarıldı.`,
-      reasons: [
-        analysis.stats
-          ? `Piyasa medyanı ${analysis.stats.medianNet.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL; en ucuz teklif medyanın %${analysis.stats.savingsVsMedianPct} altında.`
-          : "Canlı mağaza teklifleri kargo dahil net fiyata göre sıralandı.",
-        `${analysis.platformBreakdown.length} farklı mağaza/pazaryeri karşılaştırıldı.`,
-      ],
+      score: analysis.stats ? (analysis.stats.savingsVsMedianPct >= 15 ? 82 : analysis.stats.savingsVsMedianPct >= 6 ? 72 : 64) : 60,
+      label: analysis.stats ? `${pricedOffers.length} Fiyatlı Teklif Karşılaştırıldı` : "Mağaza Bağlantıları Bulundu",
+      tone: analysis.stats && analysis.stats.savingsVsMedianPct >= 10 ? "good" : "good-soft",
+      headline: analysis.stats
+        ? `En ucuz net teklif ${analysis.stats.minNet.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL (${analysis.picks?.cheapestNet?.store || ""}).`
+        : "Fiyatlar doğrudan mağaza sayfalarından incelenebilir.",
+      reasons: analysis.stats
+        ? [
+            `Piyasa medyanı ${analysis.stats.medianNet.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL; en ucuz seçenek medyanın %${analysis.stats.savingsVsMedianPct} altında.`,
+            `${analysis.platformBreakdown.length} farklı mağaza/platform karşılaştırıldı.`,
+            "Satın almadan önce mağaza linkinden güncel beden/renk ve kargo tutarını doğrulamanız önerilir.",
+          ]
+        : ["Bu aramada fiyat bilgisi ürün sayfalarının içinde yer alıyor; aşağıdaki mağaza linklerinden anında açabilirsiniz."],
     },
-    variants: [],
+    variants: extraStoreVariants,
     specs: [],
   };
 
   saveVirtualDetail(aggregateKey, aggregateDetail);
 
-  // Also cache each individual clicked item pointing to a focused cluster of similar offers
-  products.forEach((p, idx) => {
+  // Cache detail view for every individual priced card
+  for (const p of products) {
     const itemTokens = tokenize(p.title);
-    const matchingOffers = offers.filter((o) => overlapScore(itemTokens, tokenize(o.offerTitle)) >= 0.45);
-    const pool = matchingOffers.length >= 2 ? matchingOffers : [offers[idx], ...offers.slice(0, 11)].filter(Boolean);
+    const similar = pricedOffers.filter((o) => overlapScore(itemTokens, tokenize(o.offerTitle)) >= 0.4);
+    const pool = similar.length >= 2 ? similar : [p._offer, ...pricedOffers.slice(0, 11)].filter(Boolean);
     const dedup = [];
     const seen = new Set();
     for (const o of pool) {
@@ -186,14 +563,15 @@ export async function searchSerperShopping(query, apiKey) {
       seen.add(o.id);
       dedup.push(o);
     }
-    const uInfo = extractUnitInfo(p.title, dedup[0]?.basePrice ?? null);
+    const uInfo = extractUnitInfo(p.title, p.lowestPrice);
     const itemAnalysis = analyzeOffers(dedup, uInfo);
+
     saveVirtualDetail(p.url, {
       ...aggregateDetail,
       id: p.id,
       title: p.title,
       url: p.url,
-      image: p.image || aggregateDetail.image,
+      image: p.image || bestImage,
       totalOfferCount: dedup.length,
       unitInfo: uInfo ? extractUnitInfo(p.title, itemAnalysis.stats?.minNet ?? p.lowestPrice) : null,
       lowPrice: itemAnalysis.stats?.minNet ?? p.lowestPrice,
@@ -204,191 +582,60 @@ export async function searchSerperShopping(query, apiKey) {
       platformBreakdown: itemAnalysis.platformBreakdown,
       offers: itemAnalysis.offers,
     });
-  });
-
-  // Put the aggregated "Tüm Teklifleri Kıyasla" summary card first when >= 2 offers exist
-  const finalProducts =
-    offers.length >= 2
-      ? [
-          {
-            id: "sp-all",
-            title: `📊 ${query} — Tüm Mağazaları Karşılaştır (${offers.length} teklif)`,
-            url: aggregateKey,
-            image: aggregateDetail.image,
-            lowestPrice: analysis.stats?.minNet ?? null,
-            offerCount: offers.length,
-            badge: "Tüm Mağazalar",
-            source: "Google Shopping TR",
-            unitInfo: aggregateDetail.unitInfo,
-          },
-          ...products,
-        ]
-      : products;
-
-  return {
-    query,
-    provider: "Google Shopping TR (Serper)",
-    directProduct: false,
-    fetchedAt: new Date().toISOString(),
-    cached: false,
-    totalFound: finalProducts.length,
-    products: finalProducts,
-    aggregateUrl: offers.length >= 2 ? aggregateKey : null,
-  };
-}
-
-/**
- * Provider 2: Google Shopping Türkiye via SerpAPI
- */
-export async function searchSerpApiShopping(query, apiKey) {
-  const url = `https://serpapi.com/search.json?engine=google_shopping&q=${encodeURIComponent(query)}&gl=tr&hl=tr&api_key=${encodeURIComponent(apiKey)}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
-  if (!res.ok) {
-    throw new Error(`SerpAPI yanıt hatası (HTTP ${res.status})`);
+    delete p._offer;
   }
-  const data = await res.json();
-  const shopping = Array.isArray(data.shopping_results) ? data.shopping_results : [];
 
-  // Normalize to Serper-like items and reuse exact analysis pipeline
-  const normalized = shopping.map((item) => ({
-    title: item.title,
-    price: item.extracted_price ?? item.price,
-    delivery: item.delivery || "",
-    source: item.source || "",
-    rating: item.rating,
-    ratingCount: item.reviews,
-    link: item.link || item.product_link,
-    imageUrl: item.thumbnail,
-  }));
-
-  // Reuse offer builder
-  return buildShoppingResponse(query, normalized, "Google Shopping TR (SerpAPI)", "serpapi");
-}
-
-function buildShoppingResponse(query, items, providerName, prefix) {
-  const offers = [];
-  const products = [];
-
-  items.forEach((item, idx) => {
-    const basePrice = parseTrPrice(item.price);
-    if (!basePrice || basePrice <= 0) return;
-
-    const shipping = parseShipping(item.delivery || "");
-    const store = parseStoreInfo(item.source || "", "");
-    if (typeof item.rating === "number" && item.rating > 0) {
-      store.sellerRating = Math.round(item.rating * 2 * 10) / 10;
-      store.sellerReviews = item.ratingCount ? `${item.ratingCount} yorum` : "";
-    }
-
-    const offer = {
-      id: `${prefix}-${idx + 1}`,
-      offerTitle: item.title || query,
-      basePrice,
-      shipping,
-      store,
-      storeLogo: null,
-      stockText: "Stokta",
-      inStock: true,
-      delivery: parseDeliverySpeed(item.delivery || ""),
-      lastUpdated: "Canlı",
-      promoNote: "",
-      akakceBadge: "",
-      url: item.link || `https://www.google.com/search?tbm=shop&q=${encodeURIComponent(item.title || query)}`,
-      isDirectLink: Boolean(item.link),
-      image: item.imageUrl || "",
-    };
-    offers.push(offer);
-
-    const vKey = `virtual:${prefix}:${encodeURIComponent(query)}:${idx}`;
-    const unitInfo = extractUnitInfo(item.title || query, basePrice + shipping.cost);
-    products.push({
-      id: `${prefix}-${idx + 1}`,
-      title: item.title || query,
-      url: vKey,
-      image: item.imageUrl || "",
-      lowestPrice: Math.round((basePrice + shipping.cost) * 100) / 100,
-      offerCount: 1,
-      badge: store.platform,
-      source: providerName,
-      unitInfo,
-    });
-  });
-
-  const aggregateKey = `virtual:${prefix}:all:${encodeURIComponent(query.toLocaleLowerCase("tr-TR"))}`;
-  const unitInfo = extractUnitInfo(query, offers[0]?.basePrice ?? null);
-  const analysis = analyzeOffers(offers, unitInfo);
-  const histAnalysis = analyzePriceHistory([], analysis.stats?.minNet ?? null);
-
-  const aggregateDetail = {
-    id: `${prefix}-${Date.now()}`,
-    title: `${query} — Tüm Türkiye Mağaza Teklifleri`,
-    brand: "",
-    category: `${providerName} · Canlı Çoklu Mağaza Karşılaştırması`,
-    description: `${query} için canlı derlenen ${offers.length} mağaza teklifi.`,
-    url: aggregateKey,
-    image: offers.find((o) => o.image)?.image || "",
-    rating: null,
-    totalOfferCount: offers.length,
-    unitInfo: unitInfo ? extractUnitInfo(query, analysis.stats?.minNet ?? offers[0]?.basePrice) : null,
-    fetchedAt: new Date().toISOString(),
-    cached: false,
-    provider: providerName,
-    lowPrice: analysis.stats?.minNet ?? null,
-    highPrice: analysis.stats?.maxNet ?? null,
-    stats: analysis.stats,
-    picks: analysis.picks,
-    shippingTraps: analysis.shippingTraps,
-    platformBreakdown: analysis.platformBreakdown,
-    offers: analysis.offers,
-    history: [],
-    historySummary: null,
-    verdict: histAnalysis.verdict,
-    variants: [],
-    specs: [],
-  };
-  saveVirtualDetail(aggregateKey, aggregateDetail);
-
-  products.forEach((p, idx) => {
-    const itemTokens = tokenize(p.title);
-    const matching = offers.filter((o) => overlapScore(itemTokens, tokenize(o.offerTitle)) >= 0.45);
-    const pool = matching.length >= 2 ? matching : [offers[idx], ...offers.slice(0, 11)].filter(Boolean);
-    const uInfo = extractUnitInfo(p.title, pool[0]?.basePrice ?? null);
-    const itemAnalysis = analyzeOffers(pool, uInfo);
-    saveVirtualDetail(p.url, {
+  // Also add unpriced catalog links as browsable cards (with direct external store jump + detail view)
+  const catalogCards = catalogLinks.slice(0, 8).map((c) => {
+    const cKey = `virtual:${prefix}:cat:${encodeURIComponent(c.id)}`;
+    saveVirtualDetail(cKey, {
       ...aggregateDetail,
-      id: p.id,
-      title: p.title,
-      url: p.url,
-      image: p.image || aggregateDetail.image,
-      totalOfferCount: pool.length,
-      unitInfo: uInfo ? extractUnitInfo(p.title, itemAnalysis.stats?.minNet ?? p.lowestPrice) : null,
-      lowPrice: itemAnalysis.stats?.minNet ?? p.lowestPrice,
-      highPrice: itemAnalysis.stats?.maxNet ?? p.lowestPrice,
-      stats: itemAnalysis.stats,
-      picks: itemAnalysis.picks,
-      shippingTraps: itemAnalysis.shippingTraps,
-      platformBreakdown: itemAnalysis.platformBreakdown,
-      offers: itemAnalysis.offers,
+      id: c.id,
+      title: c.title,
+      url: cKey,
+      image: c.image || bestImage,
+      description: c.snippet,
+      variants: [
+        { name: `${c.store} Sayfasına Git`, price: null, seller: c.store, url: c.url, isAkakceUrl: false },
+        ...extraStoreVariants.filter((v) => v.url !== c.url),
+      ],
     });
+    return {
+      id: c.id,
+      title: c.title,
+      url: cKey,
+      externalUrl: c.url,
+      image: c.image,
+      lowestPrice: null,
+      offerCount: 1,
+      badge: c.store,
+      source: c.store,
+      unitInfo: null,
+    };
   });
 
-  const finalProducts =
-    offers.length >= 2
+  // Sort priced cards by lowestPrice ascending, prepend aggregate summary card when >= 2 priced offers exist
+  products.sort((a, b) => (a.lowestPrice ?? Infinity) - (b.lowestPrice ?? Infinity));
+
+  const finalProducts = [
+    ...(pricedOffers.length >= 2
       ? [
           {
             id: `${prefix}-all`,
-            title: `📊 ${query} — Tüm Mağazaları Karşılaştır (${offers.length} teklif)`,
+            title: `📊 ${query} — Tüm Mağazaları Karşılaştır (${pricedOffers.length} fiyatlı teklif)`,
             url: aggregateKey,
-            image: aggregateDetail.image,
+            image: bestImage,
             lowestPrice: analysis.stats?.minNet ?? null,
-            offerCount: offers.length,
+            offerCount: pricedOffers.length,
             badge: "Tüm Mağazalar",
             source: providerName,
             unitInfo: aggregateDetail.unitInfo,
           },
-          ...products,
         ]
-      : products;
+      : []),
+    ...products,
+    ...catalogCards,
+  ];
 
   return {
     query,
@@ -397,8 +644,9 @@ function buildShoppingResponse(query, items, providerName, prefix) {
     fetchedAt: new Date().toISOString(),
     cached: false,
     totalFound: finalProducts.length,
+    pricedFound: pricedOffers.length,
     products: finalProducts,
-    aggregateUrl: offers.length >= 2 ? aggregateKey : null,
+    aggregateUrl: pricedOffers.length >= 2 ? aggregateKey : null,
   };
 }
 
@@ -406,7 +654,7 @@ function buildShoppingResponse(query, items, providerName, prefix) {
  * Provider 3 (Zero-Key Official Cloud-Proof Fallback):
  * Combines:
  * - T.C. Ticaret Bakanlığı / TÜBİTAK Market Fiyatı API (A101, BİM, CarrefourSA, Migros, ŞOK, Hakmar, Tarım Kredi)
- * - Migros Elektronik REST API (iPhones, Dyson, PlayStation, TVs, appliances)
+ * - Migros Elektronik REST API
  * - Migros Sanal Market REST API
  */
 export async function searchOfficialFallback(query) {
@@ -458,7 +706,6 @@ async function fetchMarketFiyati(query) {
     const depots = Array.isArray(item.productDepotInfoList) ? item.productDepotInfoList : [];
     if (!depots.length) continue;
 
-    // Group best price per supermarket chain
     const byChain = new Map();
     for (const d of depots) {
       const p = typeof d.price === "number" ? d.price : parseTrPrice(d.price);
@@ -562,7 +809,6 @@ async function fetchMigros(query, vertical = "elektronik") {
   for (const it of items.slice(0, 18)) {
     const rawPrice = it.shownPrice || it.salePrice || it.regularPrice;
     if (!rawPrice || rawPrice <= 0) continue;
-    // Migros REST API returns prices in kuruş (integer * 100)
     const price = Math.round((rawPrice / 100) * 100) / 100;
     const regularPrice = it.regularPrice ? Math.round((it.regularPrice / 100) * 100) / 100 : null;
     const title = String(it.name || "").trim();
