@@ -2,7 +2,6 @@ services:
   - type: web
     name: fiyatradar
     runtime: node
-    region: frankfurt
     plan: free
     buildCommand: npm install
     startCommand: npm start
