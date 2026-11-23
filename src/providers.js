@@ -11,7 +11,10 @@
  */
 
 import {
+  areColorsCompatible,
+  extractColorFromText,
   extractUnitInfo,
+  extractVariantAttributes,
   isAccessoryTitle,
   parseDeliverySpeed,
   parseShipping,
@@ -191,13 +194,201 @@ function isNonShoppingUrl(urlStr) {
   }
 }
 
+const LISTING_PATH_RE =
+  /(?:^|\/)(sr|ara|arama|search|kategori|category|marka|markalar|brand|butik|magaza|koleksiyon|koleksiyonlar|kampanya|kampanyalar|tum-urunler|indirimler)(?:\/|$)/i;
+
+const LISTING_TITLE_RE =
+  /\b(modelleri\s*(?:ve|,|&)\s*fiyatlari|fiyatlari\s*(?:ve|,|&)\s*modelleri|cesitleri\s*(?:ve|,|&)\s*fiyatlari|markalari\s*(?:ve|,|&)\s*fiyatlari|urunleri\s*(?:ve|,|&)\s*fiyatlari|en\s+ucuz\s+.+\s+fiyatlari|parfumeri|parfumleri|gomlekleri|ayakkabilari|tisortleri|elbiseleri|pantolonlari|ceketleri|cantalari|gozlukleri|saatleri|telefonlari|bilgisayarlari)\b/i;
+
+const SEARCH_QUERY_PARAMS = ["q", "query", "search", "arama", "keyword", "k", "s", "ft"];
+
+function normalizeUrlForMatch(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    return `${u.hostname.replace(/^www\.|^m\./i, "").toLowerCase()}${u.pathname.replace(/\/+$/, "").toLowerCase()}`;
+  } catch {
+    return String(urlStr || "").toLowerCase().replace(/\/+$/, "");
+  }
+}
+
 /**
- * Extracts live TL price & shipping cues from Google Turkey organic/rich result objects.
- * Handles:
- * - Structured rich result fields (item.price, item.priceRange, item.attributes)
- * - Turkish TL/₺ prices in snippet/title ("1.990,00 TL", "₺54.999", "81.997,26 TL", "2.490 TL")
- * - Installment patterns ("3x 596,67 TL" -> 1.790,01 TL when no direct cash price exists)
- * - Avoids mistaking shipping thresholds ("500 TL üzeri kargo bedava") or shipping fees ("+44,99 TL kargo") for product prices
+ * Classifies a Turkish e-commerce URL as either a direct single-product page (`isProductPage: true`)
+ * or a category / search / brand listing page (`isListingPage: true`), and extracts a canonical
+ * store-scoped productId when present.
+ */
+export function classifyStoreUrl(urlStr, title = "") {
+  if (!urlStr || typeof urlStr !== "string") {
+    return { isProductPage: false, isListingPage: false, productId: null, slug: "" };
+  }
+
+  let u;
+  try {
+    u = new URL(urlStr);
+  } catch {
+    return { isProductPage: false, isListingPage: false, productId: null, slug: "" };
+  }
+
+  const host = u.hostname.replace(/^www\.|^m\./i, "").toLowerCase();
+  const pathname = u.pathname || "/";
+  let decodedPath = pathname;
+  try {
+    decodedPath = decodeURIComponent(pathname);
+  } catch {
+    decodedPath = pathname;
+  }
+  const slug = decodedPath.replace(/[-_/]+/g, " ").trim();
+
+  // 1. Trendyol: direct products ALWAYS contain -p-<digits>
+  if (host === "trendyol.com" || host.endsWith(".trendyol.com")) {
+    const m = pathname.match(/-p-(\d+)(?:\/|$)/i);
+    if (m) return { isProductPage: true, isListingPage: false, productId: `ty:${m[1]}`, slug };
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+
+  // 2. Hepsiburada: direct products ALWAYS contain -p-<id> or -pm-<id>
+  if (host === "hepsiburada.com" || host.endsWith(".hepsiburada.com")) {
+    const m = pathname.match(/-pm?-([a-z0-9]+)(?:\/|$)/i);
+    if (m) return { isProductPage: true, isListingPage: false, productId: `hb:${m[1].toLowerCase()}`, slug };
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+
+  // 3. Amazon TR: /dp/<ASIN> or /gp/product/<ASIN>
+  if (host === "amazon.com.tr" || host.endsWith(".amazon.com.tr")) {
+    const m = pathname.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})(?:\/|$)/i);
+    if (m) return { isProductPage: true, isListingPage: false, productId: `amz:${m[1].toLowerCase()}`, slug };
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+
+  // 4. n11: /urun/...
+  if (host === "n11.com" || host.endsWith(".n11.com")) {
+    if (/\/urun\//i.test(pathname)) {
+      const m = pathname.match(/-(\d{5,})(?:\/|$)/);
+      return { isProductPage: true, isListingPage: false, productId: m ? `n11:${m[1]}` : null, slug };
+    }
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+
+  // 5. Zara: -p<digits>.html = product; -l<digits>.html = category listing
+  if (host === "zara.com" || host.endsWith(".zara.com")) {
+    const m = pathname.match(/-p(\d{5,})\.html/i);
+    if (m) return { isProductPage: true, isListingPage: false, productId: `zara:${m[1]}`, slug };
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+
+  // 6. Stradivarius / Pull&Bear / Massimo Dutti / Oysho: -l<6+ digits> or -c<id>p<id> or ?pe=<id>
+  if (/(?:^|\.)(stradivarius|pullandbear|massimodutti|oysho)\.com$/.test(host)) {
+    const mL = pathname.match(/-l(\d{6,})(?:\.html|\/|$)/i);
+    const mCP = pathname.match(/-c\d*p(\d{5,})(?:\.html|\/|$)/i);
+    const pe = u.searchParams.get("pe");
+    if (mL || mCP || (pe && /^\d{5,}$/.test(pe))) {
+      const pid = mL?.[1] || mCP?.[1] || pe;
+      return { isProductPage: true, isListingPage: false, productId: `ind:${pid}`, slug };
+    }
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+
+  // 7. Bershka: -c0p<digits>.html or -p<digits>.html
+  if (host === "bershka.com" || host.endsWith(".bershka.com")) {
+    const m = pathname.match(/-(?:c\d*)?p(\d{5,})\.html/i);
+    if (m) return { isProductPage: true, isListingPage: false, productId: `ind:${m[1]}`, slug };
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+
+  // 8. Akakçe & Cimri
+  if (host === "akakce.com" || host.endsWith(".akakce.com")) {
+    const m = pathname.match(/fiyati,(\d+)\.html/i);
+    if (m) return { isProductPage: true, isListingPage: false, productId: `akakce:${m[1]}`, slug };
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+  if (host === "cimri.com" || host.endsWith(".cimri.com")) {
+    const m = pathname.match(/,a?(\d+)$/i);
+    if (m) return { isProductPage: true, isListingPage: false, productId: `cimri:${m[1]}`, slug };
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+
+  // 9. Major TR marketplaces with deterministic -p-<id> product URLs
+  if (/(?:^|\.)(pazarama\.com|idefix\.com|boyner\.com\.tr|pttavm\.com|teknosa\.com|migros\.com\.tr|gratis\.com|watsons\.com\.tr)$/.test(host)) {
+    const m = pathname.match(/-p-([a-z0-9]+)(?:\/|$)/i) || pathname.match(/\/p\/([^/]+)/i);
+    if (m) {
+      const prefix = host.split(".")[0];
+      return { isProductPage: true, isListingPage: false, productId: `${prefix}:${m[1].toLowerCase()}`, slug };
+    }
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+
+  // 10. MediaMarkt / Sephora / Mango / H&M / Çiçeksepeti / LCW / Beymen
+  if (host === "mediamarkt.com.tr" || host.endsWith(".mediamarkt.com.tr")) {
+    if (/\/product\//i.test(pathname)) {
+      const m = pathname.match(/-(\d{6,})\.html/i);
+      return { isProductPage: true, isListingPage: false, productId: m ? `mm:${m[1]}` : null, slug };
+    }
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+  if (host === "ciceksepeti.com" || host.endsWith(".ciceksepeti.com")) {
+    const m = pathname.match(/-(kcm?\d+)(?:\/|$)/i);
+    if (m) return { isProductPage: true, isListingPage: false, productId: `cs:${m[1].toLowerCase()}`, slug };
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+  if (host === "sephora.com.tr" || host.endsWith(".sephora.com.tr") || host === "mango.com" || host.endsWith(".mango.com")) {
+    if (/\/p\//i.test(pathname)) return { isProductPage: true, isListingPage: false, productId: null, slug };
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+  if (host === "hm.com" || host.endsWith(".hm.com")) {
+    const m = pathname.match(/productpage\.(\d+)\.html/i);
+    if (m) return { isProductPage: true, isListingPage: false, productId: `hm:${m[1]}`, slug };
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+  if (host === "lcw.com" || host === "lcwaikiki.com" || host.endsWith(".lcw.com") || host.endsWith(".lcwaikiki.com")) {
+    const m = pathname.match(/-o-(\d+)/i);
+    if (m || /\/urun\//i.test(pathname)) {
+      return { isProductPage: true, isListingPage: false, productId: m ? `lcw:${m[1]}` : null, slug };
+    }
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+  if (host === "beymen.com" || host.endsWith(".beymen.com")) {
+    const m = pathname.match(/(?:\/p_|_)(\d{5,})(?:\/|$)/i);
+    if (m || /\/p_/i.test(pathname)) {
+      return { isProductPage: true, isListingPage: false, productId: m ? `beymen:${m[1]}` : null, slug };
+    }
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+
+  // 11. Universal fallback checks for other stores
+  const hasSearchQueryParam = SEARCH_QUERY_PARAMS.some((k) => u.searchParams.has(k));
+  if (hasSearchQueryParam || LISTING_PATH_RE.test(pathname)) {
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+
+  // Check if the URL clearly carries a generic product pattern (-p-<id>, /urun/, /product/)
+  const genericProd = pathname.match(/-p-([a-z0-9]+)(?:\/|$)/i);
+  if (genericProd) {
+    return { isProductPage: true, isListingPage: false, productId: `${host}:${genericProd[1].toLowerCase()}`, slug };
+  }
+  if (/\/(urun|product|p)\//i.test(pathname)) {
+    return { isProductPage: true, isListingPage: false, productId: null, slug };
+  }
+
+  // Plural category titles on ambiguous URLs indicate a category/listing page
+  const asciiTitle = transliterateTr(title).toLowerCase();
+  if (asciiTitle && LISTING_TITLE_RE.test(asciiTitle)) {
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+
+  // Root / homepage URLs are never single products
+  if (pathname === "/" || pathname.split("/").filter(Boolean).length === 0) {
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+
+  return { isProductPage: true, isListingPage: false, productId: null, slug };
+}
+
+/**
+ * Extracts live TL cash price & shipping cues from Google Turkey organic/rich result objects.
+ * Strict protections:
+ * - Rejects category/search/listing pages so misleading category minimums ("552 TL'den başlayan") never appear as product prices
+ * - Never returns a single monthly installment amount ("3 taksit 552 TL", "ayda 552 TL", "₺552 x 6") as a cash price
+ * - Computes interest-free total ONLY when explicitly "peşin fiyatına / vadesiz / faizsiz" (or unambiguous N x amount without interest)
+ * - Avoids shipping thresholds ("500 TL ve üzeri kargo bedava"), shipping fees ("+44,99 TL kargo"), coupons, and wide price ranges
  */
 export function extractOrganicPriceInfo(item) {
   const snippet = String(item?.snippet || "");
@@ -221,74 +412,181 @@ export function extractOrganicPriceInfo(item) {
     }
   }
 
-  // 2. Check structured rich fields first (Google rich product schema parsed by Serper/SerpAPI)
+  // 2. If link is a category / search / brand listing page, do NOT treat snippet/range numbers as a product price!
+  if (item?.link && classifyStoreUrl(item.link, title).isListingPage) {
+    return { price: null, shipping, source: "listing" };
+  }
+
+  const asciiCombined = transliterateTr(combinedText);
+  const installmentTotals = [];
+  const installmentUnitValues = [];
+
+  const isInterestFreeContext = (ctx) =>
+    /(pesin\s+fiyatina|vadesiz|faizsiz)/i.test(ctx) && !/(vade\s+fark|faizli)/i.test(ctx);
+
+  // Pre-scan explicit installment expressions to collect monthly unit values (to block false rich prices)
+  // and compute interest-free cash totals when explicitly "peşin fiyatına / vadesiz / faizsiz"
+  const instPatterns = [
+    // "3x 596,67 TL" or "3 x ₺596,67"
+    {
+      re: /(\d{1,2})\s*[x×]\s*(?:₺|TRY)?\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺|TRY)?/gi,
+      mulIdx: 1,
+      valIdx: 2,
+    },
+    // "552 TL x 3" or "₺552 x 6 taksit"
+    {
+      re: /(?:₺|TRY)?\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺|TRY)?\s*[x×]\s*(\d{1,2})\s*(?:taksit|ay)?/gi,
+      mulIdx: 2,
+      valIdx: 1,
+    },
+    // "3 taksit 552,00 TL" or "3 taksitle ₺552"
+    {
+      re: /(\d{1,2})\s*(?:ay\s*)?taksit(?:le|li|e)?\s*(?:[:x×-]?\s*)?(?:ayda\s*)?(?:₺|TRY)?\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺|TRY)/gi,
+      mulIdx: 1,
+      valIdx: 2,
+    },
+  ];
+
+  for (const { re, mulIdx, valIdx } of instPatterns) {
+    for (const m of asciiCombined.matchAll(re)) {
+      // Must actually carry a currency marker near the match so "3 x 200 ml" is never treated as money!
+      const localWindow = asciiCombined.slice(
+        Math.max(0, (m.index || 0) - 45),
+        Math.min(asciiCombined.length, (m.index || 0) + m[0].length + 25)
+      );
+      if (!/(?:TL|₺|TRY)/i.test(m[0]) && !/taksit/i.test(localWindow)) continue;
+      if (/\b(ml|gr|kg|lt|cm|mm|gb|tb|adet)\b/i.test(m[0])) continue;
+
+      const mul = Number.parseInt(m[mulIdx], 10);
+      const val = parseTrPrice(m[valIdx]);
+      if (!val || val < 10 || mul < 2 || mul > 12) continue;
+
+      installmentUnitValues.push(val);
+      if (isInterestFreeContext(localWindow)) {
+        installmentTotals.push(Math.round(val * mul * 100) / 100);
+      }
+    }
+  }
+
+  // Also catch bare monthly installment mentions ("ayda 552 TL", "aylık ₺552", "552 TL / ay", "552 TL taksit")
+  for (const m of asciiCombined.matchAll(/(?:ayda|aylik|her\s+ay)\s*(?:₺|TRY)?\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺|TRY)?/gi)) {
+    const val = parseTrPrice(m[1]);
+    if (val && val >= 10) installmentUnitValues.push(val);
+  }
+  for (const m of asciiCombined.matchAll(/(?:₺|TRY)?\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺|TRY)\s*(?:\/?\s*ay\b|aylik\b|taksit)/gi)) {
+    const val = parseTrPrice(m[1]);
+    if (val && val >= 10) installmentUnitValues.push(val);
+  }
+
+  const looksLikeInstallmentUnit = (candidateVal) =>
+    installmentUnitValues.some((u) => Math.abs(u - candidateVal) <= 0.5);
+
+  // 3. Check structured rich fields first (Google rich product schema parsed by Serper/SerpAPI)
   const currencyRaw = String(item?.currency || "").toUpperCase();
   const isForeignCurrency =
     currencyRaw && !["TRY", "TL", "₺"].includes(currencyRaw) && /USD|\$|EUR|€|GBP|£/.test(currencyRaw);
 
   if (!isForeignCurrency) {
-    if (typeof item?.price === "number" && item.price > 0) {
-      return { price: Math.round(item.price * 100) / 100, shipping, source: "rich" };
-    }
-    if (typeof item?.price === "string" && item.price.trim()) {
+    let richPrice = null;
+    if (typeof item?.price === "number" && item.price >= 10) {
+      richPrice = Math.round(item.price * 100) / 100;
+    } else if (typeof item?.price === "string" && item.price.trim()) {
       const p = parseTrPrice(item.price);
-      if (p && p > 0) return { price: p, shipping, source: "rich" };
+      if (p && p >= 10) richPrice = p;
     }
+    if (richPrice !== null && !looksLikeInstallmentUnit(richPrice)) {
+      return { price: richPrice, shipping, source: "rich" };
+    }
+
     if (typeof item?.priceRange === "string" && item.priceRange.trim()) {
-      const p = parseTrPrice(item.priceRange);
-      if (p && p > 0) return { price: p, shipping, source: "range" };
+      // Reject wide multi-product price ranges (e.g. "₺552 - ₺3.499") — keep only single or tight ranges
+      const nums = [...item.priceRange.matchAll(/(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)/g)]
+        .map((x) => parseTrPrice(x[1]))
+        .filter((n) => typeof n === "number" && n >= 10);
+      if (nums.length === 1 && !looksLikeInstallmentUnit(nums[0])) {
+        return { price: nums[0], shipping, source: "range" };
+      }
+      if (nums.length >= 2) {
+        const low = Math.min(...nums);
+        const high = Math.max(...nums);
+        if (low > 0 && high <= low * 1.15 && !looksLikeInstallmentUnit(low)) {
+          return { price: low, shipping, source: "range" };
+        }
+      }
     }
   }
 
-  // 3. Scan snippet + attributes + title for TL / ₺ prices
+  // 4. Unified context-aware scanner for BOTH "1.990,00 TL" and "₺1.990,00" / "TRY 1,990.00"
   const directCandidates = [];
-  const installmentCandidates = [];
 
-  // Pattern A: optional "3x " + number + " TL / ₺ / TRY"
-  const afterRe = /(?:(\d{1,2})\s*[x×]\s*)?(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺|TRY)(?![a-zA-ZğüşıöçĞÜŞİÖÇ])/gi;
+  const isDisqualifiedByContext = (beforeRaw, afterRaw) => {
+    const before = transliterateTr(beforeRaw).toLowerCase();
+    const after = transliterateTr(afterRaw).toLowerCase();
+
+    // Installment cues before or after the number (regardless of price magnitude!)
+    if (/(\d{1,2}\s*[x×]\s*$|\btaksit(?:le|li|i|e|ten|ler)?\s*[:x×-]?\s*$|\bayda\s*$|\baylik\s*$|\bher\s+ay\s*$|\d{1,2}\s*ay\s*[:x×-]?\s*$)/i.test(before)) {
+      return true;
+    }
+    if (/^\s*(?:[x×]\s*\d{1,2}\b|\/?\s*ay\b|aylik\b|taksit|['’]?lik\s+taksit|['’]?(?:den|dan|ten|tan)\s+baslayan\s+taksit)/i.test(after)) {
+      return true;
+    }
+
+    // Shipping fees/thresholds, coupons, discounts, points, bonuses, minimum basket
+    if (/^\s*(?:ve\s+)?(kargo|uzeri|uzerine|ustu|ustune|alti|altinda|indirim|kupon|puan|hediye|cashback|kazan|tasarruf|bonus|chip|iade|alisveris|sepet|komisyon|degerinde)\b/i.test(after)) {
+      return true;
+    }
+    if (/^\s*['’]?(?:ye|ya|e|a)\s+varan\b/i.test(after)) return true;
+    if (/^\s*['’]?(?:den|dan|ten|tan)\s+baslayan\b/i.test(after)) return true;
+    if (/^\s*['’]?(?:lik|luk)\s+(?:alisveris|kupon|indirim|hediye|puan|taksit)\b/i.test(after)) return true;
+
+    // Price range ("552 TL - 2.499 TL" or "552 TL ile 2.499 TL")
+    if (/^\s*(?:-|–|ile)\s*(?:₺|TRY)?\s*\d/i.test(after)) return true;
+    if (/\d\s*(?:tl|₺|try)\s*(?:-|–|ile)\s*$/i.test(before)) return true;
+
+    if (/(kargo|kupon|indirim|puan|hediye|bonus|kazan|tasarruf|iade|en\s+az|minimum|min\.?|alt\s+limit|sepet\s+alt|uzeri|ustu)\s*[:+]?\s*$/i.test(before)) {
+      return true;
+    }
+
+    return false;
+  };
+
+  // Pattern A: number followed by "TL / ₺ / TRY"
+  const afterRe = /(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s*(?:TL|₺|TRY)(?![a-zA-ZğüşıöçĞÜŞİÖÇ])/gi;
   for (const m of combinedText.matchAll(afterRe)) {
-    const val = parseTrPrice(m[2]);
+    const val = parseTrPrice(m[1]);
     if (!val || val < 10) continue;
-    const afterCtx = combinedText.slice((m.index || 0) + m[0].length, (m.index || 0) + m[0].length + 26).toLowerCase();
-    const beforeCtx = combinedText.slice(Math.max(0, (m.index || 0) - 24), m.index || 0).toLowerCase();
-
-    // Skip shipping fees, coupon discounts, free-shipping minimums
-    if (/^\s*(kargo|üzeri|üzerine|altı|indirim|kupon|puan|hediye|cashback|kazan)/i.test(afterCtx)) continue;
-    if (/(kargo|kupon|indirim|puan|hediye)\s*[:+]?\s*$/i.test(beforeCtx)) continue;
-
-    if (m[1]) {
-      const mul = Number.parseInt(m[1], 10);
-      if (mul >= 2 && mul <= 12) {
-        installmentCandidates.push(Math.round(val * mul * 100) / 100);
-        continue;
-      }
-    }
-    if (/taksit/i.test(afterCtx) && val < 2000) {
-      continue;
-    }
+    const beforeCtx = combinedText.slice(Math.max(0, (m.index || 0) - 36), m.index || 0);
+    const afterCtx = combinedText.slice((m.index || 0) + m[0].length, (m.index || 0) + m[0].length + 36);
+    if (isDisqualifiedByContext(beforeCtx, afterCtx)) continue;
+    if (looksLikeInstallmentUnit(val)) continue;
     directCandidates.push(val);
   }
 
-  // Pattern B: "₺1.990,00" or "TRY 54,999.00"
+  // Pattern B: "₺1.990,00" or "TRY 54,999.00" (now with identical strict context filtering!)
   const beforeRe = /(?:₺|TRY)\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)/gi;
   for (const m of combinedText.matchAll(beforeRe)) {
     const val = parseTrPrice(m[1]);
     if (!val || val < 10) continue;
+    const beforeCtx = combinedText.slice(Math.max(0, (m.index || 0) - 36), m.index || 0);
+    const afterCtx = combinedText.slice((m.index || 0) + m[0].length, (m.index || 0) + m[0].length + 36);
+    if (isDisqualifiedByContext(beforeCtx, afterCtx)) continue;
+    if (looksLikeInstallmentUnit(val)) continue;
     directCandidates.push(val);
   }
 
   if (directCandidates.length > 0) {
     return { price: directCandidates[0], shipping, source: "snippet" };
   }
-  if (installmentCandidates.length > 0) {
-    return { price: installmentCandidates[0], shipping, source: "installment" };
+  if (installmentTotals.length > 0) {
+    return { price: installmentTotals[0], shipping, source: "installment" };
   }
 
   return { price: null, shipping, source: "none" };
 }
 
-// Image enrichment cache (15 min TTL)
+// Image & OG-image enrichment caches (15-30 min TTL)
 const imageCache = new Map();
+const ogImageCache = new Map();
 
 function getCachedImages(qKey) {
   const entry = imageCache.get(qKey);
@@ -301,18 +599,111 @@ function getCachedImages(qKey) {
 }
 
 function setCachedImages(qKey, images) {
-  if (imageCache.size > 150) {
+  if (imageCache.size > 200) {
     imageCache.delete(imageCache.keys().next().value);
   }
   imageCache.set(qKey, { images, expiresAt: Date.now() + 15 * 60 * 1000 });
 }
 
+// Stores whose product pages respond cleanly to fast lightweight og:image metadata lookups
+const FAST_OG_HOSTS = ["idefix.com", "akakce.com", "migros.com.tr", "pazarama.com", "cimri.com"];
+
+function isFastOgHost(urlStr) {
+  try {
+    const host = new URL(urlStr).hostname.replace(/^www\./i, "").toLowerCase();
+    return FAST_OG_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+  } catch {
+    return false;
+  }
+}
+
+async function fetchProductOgImage(urlStr) {
+  if (!urlStr || !isFastOgHost(urlStr)) return "";
+  const cached = ogImageCache.get(urlStr);
+  if (cached && Date.now() <= cached.expiresAt) return cached.image;
+
+  try {
+    const res = await fetch(urlStr, {
+      headers: { "User-Agent": UA, "Accept-Language": "tr-TR,tr;q=0.9" },
+      signal: AbortSignal.timeout(2200),
+      redirect: "follow",
+    });
+    if (!res.ok) return "";
+    const html = (await res.text()).slice(0, 45000);
+    const ogMatch =
+      html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i) ||
+      html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["']/i);
+    let img = ogMatch?.[1]?.trim() || "";
+    if (img.startsWith("//")) img = `https:${img}`;
+    if (!/^https?:\/\//i.test(img) || /favicon|logo|placeholder/i.test(img)) img = "";
+    if (ogImageCache.size > 300) {
+      ogImageCache.delete(ogImageCache.keys().next().value);
+    }
+    ogImageCache.set(urlStr, { image: img, expiresAt: Date.now() + 30 * 60 * 1000 });
+    return img;
+  } catch {
+    return "";
+  }
+}
+
+function isUsableDirectPhoto(urlStr) {
+  if (!urlStr || typeof urlStr !== "string") return false;
+  const s = urlStr.trim();
+  if (!/^https?:\/\//i.test(s)) return false;
+  if (/google\.com\/s2\/favicons|favicon\.ico/i.test(s)) return false;
+  return true;
+}
+
+function detectExplicitImageColor(im) {
+  if (!im) return null;
+  const fromTitle = extractColorFromText(im.title || "");
+  if (fromTitle) return fromTitle;
+  if (im.link) {
+    try {
+      const u = new URL(im.link);
+      const fromLink = extractColorFromText(decodeURIComponent(u.pathname));
+      if (fromLink) return fromLink;
+    } catch {
+      // Ignore malformed link
+    }
+  }
+  if (im.imageUrl) {
+    try {
+      const u = new URL(im.imageUrl);
+      const fromUrl = extractColorFromText(decodeURIComponent(u.pathname));
+      if (fromUrl) return fromUrl;
+    } catch {
+      // Ignore
+    }
+  }
+  return null;
+}
+
+function buildColorImageQuery(baseQuery, color) {
+  const existingColor = extractColorFromText(baseQuery);
+  let cleaned = String(baseQuery || "").trim();
+  if (existingColor && !areColorsCompatible(existingColor, color)) {
+    const colorAscii = transliterateTr(existingColor).toLowerCase();
+    cleaned = cleaned
+      .split(/\s+/)
+      .filter((w) => transliterateTr(w).toLowerCase() !== colorAscii)
+      .join(" ")
+      .trim();
+  }
+  const colorLower = transliterateTr(color).toLowerCase();
+  if (transliterateTr(cleaned).toLowerCase().includes(colorLower)) {
+    return cleaned;
+  }
+  return `${cleaned} ${color}`.trim();
+}
+
 /**
- * Provider 1: Serper.dev Google Türkiye Search Engine (v2)
- * - Uses num: 10 (Google's post-2025 reliable page size — prevents intermittent empty SERP pages!)
- * - Automatic retry with clean query & ASCII-transliterated Turkish fallback (fixes "gucci güneş gözlüğü" -> 0 bug)
- * - Automatic real product photo enrichment via Serper /images when organic cards lack photos
- * - Accessory tagging so cases/straps don't distort price medians
+ * Provider 1: Serper.dev Google Türkiye Search Engine (v3)
+ * - Uses num: 10 (Google's post-2025 reliable page size — prevents intermittent empty SERP pages)
+ * - Automatic retry with clean query & ASCII-transliterated Turkish fallback
+ * - Strictly separates direct product pages from category/search listing pages
+ * - Automatically targets direct product URLs (-p-, /dp/, /urun/, fiyati,) when Query 1 returns category pages
+ * - Color-aware & product-ID-aware image enrichment so Siyah/Beyaz/Yeşil variants show their own true photos
  */
 export async function searchSerperTurkey(query, apiKey) {
   const callSerper = async (endpoint, body) => {
@@ -336,7 +727,7 @@ export async function searchSerperTurkey(query, apiKey) {
     return res.json();
   };
 
-  // Query 1: Clean Turkish price query with reliable num: 10 (no over-constraining literal "TL")
+  // Query 1: Clean Turkish price query with reliable num: 10
   const q1 = /fiyat|tl\b/i.test(query) ? query : `${query} fiyat`;
   let data1 = await callSerper("search", {
     q: q1,
@@ -380,52 +771,111 @@ export async function searchSerperTurkey(query, apiKey) {
   }
 
   let combinedOrganic = [...organic1];
+  const extraInlineImages = Array.isArray(data1.images) ? [...data1.images] : [];
 
-  // Count how many non-accessory priced items came back from Query 1
-  const pricedCount1 = organic1.filter(
-    (it) =>
-      !isNonShoppingUrl(it.link) &&
-      !isAccessoryTitle(it.title, query) &&
-      extractOrganicPriceInfo(it).price !== null
-  ).length;
+  // Count how many DIRECT (non-listing, non-accessory) priced product pages came back from Query 1
+  const directPricedCount1 = organic1.filter((it) => {
+    if (!it?.link || isNonShoppingUrl(it.link)) return false;
+    if (classifyStoreUrl(it.link, it.title).isListingPage) return false;
+    if (isAccessoryTitle(it.title, query)) return false;
+    return extractOrganicPriceInfo(it).price !== null;
+  }).length;
 
-  // Query 2 (when < 5 priced items): targeted major Turkish marketplaces & comparators
-  if (pricedCount1 < 5) {
+  // Query 2 (when < 5 direct priced product pages): explicitly target DIRECT PRODUCT URLs
+  // (-p- on Trendyol/Hepsiburada/Boyner/idefix/Pazarama/Teknosa/Migros/Gratis/Watsons,
+  //  /dp/ on Amazon TR, /urun/ on n11/LCW, fiyati, on Akakçe) so category/search pages don't dominate!
+  if (directPricedCount1 < 5) {
     try {
       const qTarget = asciiQuery !== query && organic1.length === 0 ? asciiQuery : query;
       const data2 = await callSerper("search", {
-        q: `${qTarget} fiyat (site:trendyol.com OR site:hepsiburada.com OR site:amazon.com.tr OR site:n11.com OR site:akakce.com OR site:cimri.com OR site:mediamarkt.com.tr OR site:teknosa.com OR site:boyner.com.tr)`,
+        q: `${qTarget} fiyat (inurl:-p- OR inurl:/dp/ OR inurl:/urun/ OR inurl:fiyati,)`,
         gl: "tr",
         hl: "tr",
         num: 10,
       });
-      if (Array.isArray(data2.organic)) {
+      if (Array.isArray(data2.organic) && data2.organic.length > 0) {
         combinedOrganic.push(...data2.organic);
+      }
+      if (Array.isArray(data2.images)) {
+        extraInlineImages.push(...data2.images);
       }
     } catch {
       // Non-fatal
     }
   }
 
-  // Enrich with real high-res product images when organic items lack imageUrl
-  let imagePool = Array.isArray(data1.images) ? data1.images : [];
-  const missingPhotos = combinedOrganic.filter((it) => !it?.imageUrl && !it?.thumbnailUrl).length;
-  if (combinedOrganic.length > 0 && missingPhotos >= Math.ceil(combinedOrganic.length * 0.5)) {
-    const imgKey = query.toLocaleLowerCase("tr-TR");
+  // Enrich with real product images + color-specific images for distinct variant colors!
+  let imagePool = [...extraInlineImages];
+  const nonListingNeedsPhoto = combinedOrganic.filter(
+    (it) =>
+      it?.link &&
+      !isNonShoppingUrl(it.link) &&
+      !classifyStoreUrl(it.link, it.title).isListingPage &&
+      !isUsableDirectPhoto(it.imageUrl) &&
+      !isUsableDirectPhoto(it.thumbnailUrl)
+  );
+
+  const fetchSerperImagesCached = async (imgQuery, hintColor = null) => {
+    const imgKey = imgQuery.toLocaleLowerCase("tr-TR");
     const cachedImgs = getCachedImages(imgKey);
-    if (cachedImgs) {
-      imagePool = cachedImgs;
-    } else {
+    let list = cachedImgs;
+    if (!list) {
       try {
-        const imgData = await callSerper("images", { q: query, gl: "tr", hl: "tr", num: 10 });
-        const imgs = Array.isArray(imgData.images) ? imgData.images : [];
-        if (imgs.length) {
-          imagePool = imgs;
-          setCachedImages(imgKey, imgs);
-        }
+        const imgData = await callSerper("images", { q: imgQuery, gl: "tr", hl: "tr", num: 10 });
+        list = Array.isArray(imgData.images) ? imgData.images : [];
+        if (list.length) setCachedImages(imgKey, list);
       } catch {
-        // Non-fatal
+        list = [];
       }
+    }
+    return hintColor ? list.map((im) => ({ ...im, _hintColor: hintColor })) : list;
+  };
+
+  if (combinedOrganic.length > 0 && (nonListingNeedsPhoto.length > 0 || imagePool.length === 0)) {
+    const baseImgs = await fetchSerperImagesCached(query, null);
+    if (baseImgs.length) imagePool = [...imagePool, ...baseImgs];
+  }
+
+  // Color-aware image enrichment: if cards include distinct colors (e.g. Siyah, Beyaz, Yeşil)
+  // that aren't well represented in imagePool yet, fetch targeted color photos in parallel!
+  if (nonListingNeedsPhoto.length > 0) {
+    const colorCounts = new Map();
+    for (const it of nonListingNeedsPhoto) {
+      const cls = classifyStoreUrl(it.link, it.title);
+      const col = extractVariantAttributes(it.title, cls.slug).color;
+      if (col) colorCounts.set(col, (colorCounts.get(col) || 0) + 1);
+    }
+
+    const colorsToEnrich = [];
+    for (const [col] of [...colorCounts.entries()].sort((a, b) => b[1] - a[1])) {
+      const existingMatches = imagePool.filter((im) => {
+        const expCol = detectExplicitImageColor(im);
+        return expCol && areColorsCompatible(col, expCol);
+      }).length;
+      if (existingMatches < 2) {
+        colorsToEnrich.push(col);
+      }
+      if (colorsToEnrich.length >= 4) break;
+    }
+
+    if (colorsToEnrich.length > 0) {
+      const colorBatches = await Promise.all(
+        colorsToEnrich.map((col) => fetchSerperImagesCached(buildColorImageQuery(query, col), col))
+      );
+      for (const batch of colorBatches) {
+        if (batch.length) imagePool.push(...batch);
+      }
+    }
+
+    // Fast og:image enrichment for non-WAF-blocked direct product pages (idefix, Akakçe, Migros, Pazarama)
+    const fastOgCandidates = nonListingNeedsPhoto.filter((it) => isFastOgHost(it.link)).slice(0, 4);
+    if (fastOgCandidates.length > 0) {
+      await Promise.all(
+        fastOgCandidates.map(async (it) => {
+          const ogImg = await fetchProductOgImage(it.link);
+          if (ogImg) it.imageUrl = ogImg;
+        })
+      );
     }
   }
 
@@ -493,37 +943,177 @@ export async function searchSerpApiTurkey(query, apiKey) {
   return buildTurkeySearchResponse(query, organic, inlineImgs, "Google Türkiye (SerpAPI)", "serpapi");
 }
 
-function pickBestProductImage(title, linkHost, imagePool, fallbackIdx) {
+const IMAGE_MATCH_STOPWORDS = new Set([
+  "trendyol",
+  "hepsiburada",
+  "amazon",
+  "n11",
+  "akakce",
+  "cimri",
+  "pazarama",
+  "idefix",
+  "pttavm",
+  "boyner",
+  "mediamarkt",
+  "teknosa",
+  "vatan",
+  "migros",
+  "fiyat",
+  "fiyati",
+  "fiyatlari",
+  "modelleri",
+  "cesitleri",
+  "online",
+  "satis",
+  "satin",
+  "turkiye",
+  "kargo",
+  "bedava",
+  "ucretsiz",
+  "ucuz",
+  "indirim",
+  "kampanya",
+  "urun",
+  "urunleri",
+  "com",
+  "www",
+  "html",
+  "tr",
+]);
+
+function meaningfulTokens(str) {
+  const out = new Set();
+  for (const w of tokenize(transliterateTr(str))) {
+    if (!IMAGE_MATCH_STOPWORDS.has(w) && !/^\d{5,}$/.test(w)) {
+      out.add(w);
+    }
+  }
+  return out;
+}
+
+/**
+ * Selects the most accurate, color-faithful, non-duplicated product photo from an image pool.
+ * Priority:
+ * 1. Exact product URL match (+100) or exact store product ID match (+80)
+ * 2. Strict color conflict rejection (never assigns a Black photo to a White/Green item!)
+ * 3. Color match bonus (explicit +14, color-query hint +7)
+ * 4. Meaningful product title + slug token overlap (extra weight on query-differentiating words)
+ * 5. Small host tiebreaker (+1.5) & heavy reuse penalty (-10) so distinct products get distinct photos
+ */
+export function pickBestProductImage(itemMeta, imagePool, usedImages = null, query = "") {
   if (!Array.isArray(imagePool) || !imagePool.length) return "";
-  const titleTokens = tokenize(title);
+
+  const meta =
+    typeof itemMeta === "string"
+      ? { title: itemMeta, url: "", host: "", productId: null, color: extractColorFromText(itemMeta), slug: "" }
+      : itemMeta || {};
+
+  const itemNormUrl = meta.url ? normalizeUrlForMatch(meta.url) : "";
+  const itemProductId = meta.productId || null;
+  const itemColor = meta.color || extractVariantAttributes(meta.title || "", meta.slug || "").color;
+  const itemTokens = meaningfulTokens(`${meta.title || ""} ${meta.slug || ""}`);
+  const queryTokens = meaningfulTokens(query);
+  const diffTokens = new Set([...itemTokens].filter((t) => !queryTokens.has(t)));
 
   let bestImg = "";
-  let bestScore = -1;
+  let bestScore = -Infinity;
+
   for (const im of imagePool) {
     const candidateUrl = im?.thumbnailUrl || im?.imageUrl || "";
-    if (!candidateUrl || candidateUrl.startsWith("data:")) continue;
+    if (!candidateUrl || candidateUrl.startsWith("data:") || !isUsableDirectPhoto(candidateUrl)) continue;
+
+    const imNormUrl = im?.link ? normalizeUrlForMatch(im.link) : "";
+    const imCls = im?.link ? classifyStoreUrl(im.link, im.title || "") : { productId: null, slug: "" };
+    const exactUrlMatch = Boolean(itemNormUrl && imNormUrl && itemNormUrl === imNormUrl);
+    const exactIdMatch = Boolean(itemProductId && imCls.productId && itemProductId === imCls.productId);
+    const exactMatch = exactUrlMatch || exactIdMatch;
+
+    const imExplicitColor = detectExplicitImageColor(im);
+    const imHintColor = im?._hintColor || null;
+
+    // HARD COLOR CONFLICT GUARD: Never show a Black photo on a White/Green product!
+    if (itemColor && !exactMatch) {
+      if (imExplicitColor && !areColorsCompatible(itemColor, imExplicitColor)) {
+        continue;
+      }
+      if (imHintColor && !areColorsCompatible(itemColor, imHintColor)) {
+        continue;
+      }
+    }
+
     let score = 0;
-    if (linkHost && im?.link && String(im.link).toLowerCase().includes(linkHost)) {
-      score += 3;
+    if (exactUrlMatch) score += 100;
+    else if (exactIdMatch) score += 80;
+
+    if (itemColor) {
+      if (imExplicitColor && areColorsCompatible(itemColor, imExplicitColor)) {
+        score += 14;
+      } else if (imHintColor && areColorsCompatible(itemColor, imHintColor)) {
+        score += 7;
+      } else if (!exactMatch) {
+        score -= 5;
+      }
     }
-    if (im?.title) {
-      score += overlapScore(titleTokens, tokenize(im.title)) * 2;
+
+    const imTokens = meaningfulTokens(`${im?.title || ""} ${imCls.slug || ""}`);
+    if (imTokens.size > 0 && itemTokens.size > 0) {
+      score += overlapScore(itemTokens, imTokens) * 8;
+      if (diffTokens.size > 0) {
+        score += overlapScore(diffTokens, imTokens) * 6;
+      }
     }
+
+    // Small same-store tiebreaker (never allowed to overpower color or product match)
+    if (meta.host && im?.link && String(im.link).toLowerCase().includes(meta.host)) {
+      score += 1.5;
+    }
+
+    // Strongly prefer distinct unused photos across cards unless exact product URL/ID matches
+    if (usedImages && usedImages.has(candidateUrl) && !exactMatch) {
+      score -= 10;
+    }
+
     if (score > bestScore) {
       bestScore = score;
       bestImg = candidateUrl;
     }
   }
 
-  if (bestScore > 0.3 && bestImg) return bestImg;
-  const pick = imagePool[fallbackIdx % imagePool.length];
-  return pick?.thumbnailUrl || pick?.imageUrl || "";
+  const minThreshold = itemColor ? 4 : 1.5;
+  if (bestImg && bestScore >= minThreshold) {
+    if (usedImages) usedImages.add(bestImg);
+    return bestImg;
+  }
+
+  // If the product has a specific color and NO compatible color photo was found,
+  // NEVER fall back to a random/wrong-color image!
+  if (itemColor) {
+    return "";
+  }
+
+  // For uncolored products, pick the first unused generic image (not locked to a different color query)
+  for (const im of imagePool) {
+    if (im?._hintColor) continue;
+    const candidateUrl = im?.thumbnailUrl || im?.imageUrl || "";
+    if (!candidateUrl || candidateUrl.startsWith("data:") || !isUsableDirectPhoto(candidateUrl)) continue;
+    if (usedImages && usedImages.has(candidateUrl)) continue;
+    if (usedImages) usedImages.add(candidateUrl);
+    return candidateUrl;
+  }
+
+  return "";
 }
 
-function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerName, prefix) {
+export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerName, prefix) {
   const imagePool = Array.isArray(imagePoolInput) ? imagePoolInput : [];
-  const defaultProductImage = imagePool[0]?.thumbnailUrl || imagePool[0]?.imageUrl || "";
+  const defaultProductImage =
+    imagePool.find((im) => !im?._hintColor && isUsableDirectPhoto(im?.thumbnailUrl || im?.imageUrl))?.thumbnailUrl ||
+    imagePool.find((im) => !im?._hintColor && isUsableDirectPhoto(im?.imageUrl))?.imageUrl ||
+    imagePool[0]?.thumbnailUrl ||
+    imagePool[0]?.imageUrl ||
+    "";
   const seenUrls = new Set();
+  const usedImages = new Set();
   const pricedOffers = [];
   const catalogLinks = [];
   const products = [];
@@ -531,21 +1121,42 @@ function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerNa
   for (const item of rawOrganic) {
     const link = item?.link;
     const title = String(item?.title || "").replace(/\s+/g, " ").trim();
-    if (!link || !title || seenUrls.has(link) || isNonShoppingUrl(link)) continue;
-    seenUrls.add(link);
+    const normLink = normalizeUrlForMatch(link);
+    if (!link || !title || seenUrls.has(normLink) || isNonShoppingUrl(link)) continue;
+    seenUrls.add(normLink);
 
+    const urlClass = classifyStoreUrl(link, title);
     const storeMeta = resolveStoreFromUrl(link, item.source || "");
     const store = parseStoreInfo(storeMeta.platform, "");
     const priceInfo = extractOrganicPriceInfo(item);
     const snippet = String(item.snippet || "").replace(/\s+/g, " ").trim();
     const delivery = parseDeliverySpeed(snippet);
     const isAccessory = isAccessoryTitle(title, query);
+    const variantAttrs = extractVariantAttributes(title, urlClass.isListingPage ? "" : urlClass.slug);
 
     const idx = pricedOffers.length + catalogLinks.length + 1;
+    const directImg = isUsableDirectPhoto(item.imageUrl)
+      ? item.imageUrl
+      : isUsableDirectPhoto(item.thumbnailUrl)
+        ? item.thumbnailUrl
+        : "";
+    if (directImg) usedImages.add(directImg);
+
     const matchedPhoto =
-      item.imageUrl ||
-      item.thumbnailUrl ||
-      pickBestProductImage(title, storeMeta.host, imagePool, idx - 1);
+      directImg ||
+      pickBestProductImage(
+        {
+          title,
+          url: link,
+          host: storeMeta.host,
+          productId: urlClass.productId,
+          color: variantAttrs.color,
+          slug: urlClass.isListingPage ? "" : urlClass.slug,
+        },
+        imagePool,
+        usedImages,
+        query
+      );
 
     if (typeof item.rating === "number" && item.rating > 0) {
       store.sellerRating = Math.round(item.rating * 2 * 10) / 10;
@@ -556,7 +1167,8 @@ function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerNa
     const sellerCountMatch = snippet.match(/(?:\+(\d+)\s*FİYAT|(\d+)\s*satıcı)/i);
     const offerCountHint = sellerCountMatch ? Number.parseInt(sellerCountMatch[1] || sellerCountMatch[2], 10) : 1;
 
-    if (priceInfo.price !== null && priceInfo.price > 0) {
+    // Only direct single-product pages with a verified cash price become priced product offers!
+    if (!urlClass.isListingPage && priceInfo.price !== null && priceInfo.price > 0) {
       const offer = {
         id: `${prefix}-${idx}`,
         offerTitle: title,
@@ -568,12 +1180,19 @@ function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerNa
         inStock: !/tükendi|stokta yok/i.test(snippet),
         delivery,
         lastUpdated: item.date || "Canlı Google TR",
-        promoNote: priceInfo.source === "installment" ? "Taksit tutarından hesaplandı" : snippet.slice(0, 110),
+        promoNote:
+          priceInfo.source === "installment"
+            ? "Peşin fiyatına taksitten hesaplandı (toplam)"
+            : snippet.slice(0, 110),
+        priceSource: priceInfo.source,
         akakceBadge: "",
         url: link,
         isDirectLink: true,
+        isProductPage: true,
+        isListingPage: false,
         isAccessory,
         image: matchedPhoto,
+        variantAttrs,
       };
       pricedOffers.push(offer);
 
@@ -585,14 +1204,18 @@ function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerNa
         title,
         url: vKey,
         externalUrl: link,
-        image: matchedPhoto || storeMeta.logoUrl || defaultProductImage,
+        image: matchedPhoto || storeMeta.logoUrl || (variantAttrs.color ? "" : defaultProductImage),
         lowestPrice: netEstimate,
+        priceSource: priceInfo.source,
         offerCount: offerCountHint,
         badge: storeMeta.platform,
         source: storeMeta.platform,
         isOfficialStore: store.isOfficialSeller || store.trustScore >= 0.92,
         isFreeShipping: Boolean(priceInfo.shipping?.isFree),
         isAccessory,
+        isProductPage: true,
+        isListingPage: false,
+        variantAttrs,
         unitInfo,
         _offer: offer,
       });
@@ -604,8 +1227,11 @@ function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerNa
         store: storeMeta.platform,
         isOfficialStore: store.isOfficialSeller || store.trustScore >= 0.92,
         isAccessory,
+        isProductPage: urlClass.isProductPage,
+        isListingPage: urlClass.isListingPage,
+        variantAttrs,
         logoUrl: storeMeta.logoUrl,
-        image: matchedPhoto || storeMeta.logoUrl || defaultProductImage,
+        image: matchedPhoto || storeMeta.logoUrl || (variantAttrs.color ? "" : defaultProductImage),
         snippet,
       });
     }
@@ -628,9 +1254,12 @@ function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerNa
   const extraStoreVariants = catalogLinks.slice(0, 10).map((c) => ({
     name: `${c.store} — ${c.title.slice(0, 56)}`,
     price: null,
-    seller: c.store,
+    seller: c.isListingPage ? `${c.store} (Kategori Sayfası)` : c.store,
     url: c.url,
+    image: c.image || "",
     isAkakceUrl: false,
+    isInternalVirtual: false,
+    isListingPage: c.isListingPage,
   }));
 
   const aggregateDetail = {
@@ -639,7 +1268,7 @@ function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerNa
     searchQuery: query,
     brand: "",
     category: `${providerName} · Canlı Çoklu Mağaza Analizi`,
-    description: `${query} için Türkiye mağazalarından canlı derlenen ${analysisPool.length} fiyatlı teklif ve ${catalogLinks.length} mağaza sayfası.`,
+    description: `${query} için Türkiye mağazalarından canlı derlenen ${analysisPool.length} doğrudan ürün teklifi ve ${catalogLinks.length} mağaza sayfası.`,
     url: aggregateKey,
     image: bestImage,
     rating: null,
@@ -660,7 +1289,7 @@ function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerNa
     verdict: {
       ...histAnalysis.verdict,
       score: analysis.stats ? (analysis.stats.savingsVsMedianPct >= 15 ? 82 : analysis.stats.savingsVsMedianPct >= 6 ? 72 : 64) : 60,
-      label: analysis.stats ? `${analysisPool.length} Fiyatlı Teklif Karşılaştırıldı` : "Mağaza Bağlantıları Bulundu",
+      label: analysis.stats ? `${analysisPool.length} Doğrudan Teklif Karşılaştırıldı` : "Mağaza Bağlantıları Bulundu",
       tone: analysis.stats && analysis.stats.savingsVsMedianPct >= 10 ? "good" : "good-soft",
       headline: analysis.stats
         ? `Doğrulanmış en ucuz net teklif ${analysis.stats.minNet.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL (${analysis.picks?.cheapestNet?.store || ""}).`
@@ -682,20 +1311,119 @@ function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerNa
 
   saveVirtualDetail(aggregateKey, aggregateDetail);
 
-  // Cache detail view for every individual priced card
+  // Helper to check if two offers belong to the same specific product & variant (no cross-model/color/volume mixing!)
+  const GENERIC_MODEL_NOISE = new Set([
+    "erkek",
+    "kadin",
+    "unisex",
+    "cocuk",
+    "bebek",
+    "ml",
+    "gr",
+    "kg",
+    "lt",
+    "cm",
+    "mm",
+    "gb",
+    "tb",
+    "adet",
+    "paket",
+    "yeni",
+    "sezon",
+    "orijinal",
+    "original",
+  ]);
+  const baseQueryToks = meaningfulTokens(query);
+  const modelDiffTokens = (str) =>
+    new Set(
+      [...meaningfulTokens(str)].filter(
+        (t) => !baseQueryToks.has(t) && !GENERIC_MODEL_NOISE.has(t) && !/^\d+$/.test(t)
+      )
+    );
+
+  const isSameVariantOffer = (baseProduct, candidateOffer) => {
+    if (!candidateOffer) return false;
+    if (candidateOffer.id === baseProduct._offer?.id) return true;
+    const pAttrs = baseProduct.variantAttrs || {};
+    const oAttrs = candidateOffer.variantAttrs || {};
+    if (pAttrs.color && oAttrs.color && !areColorsCompatible(pAttrs.color, oAttrs.color)) return false;
+    if (pAttrs.capacity && oAttrs.capacity && pAttrs.capacity !== oAttrs.capacity) return false;
+    if (pAttrs.volume && oAttrs.volume && pAttrs.volume !== oAttrs.volume) return false;
+
+    const pToks = meaningfulTokens(baseProduct.title);
+    const oToks = meaningfulTokens(candidateOffer.offerTitle);
+    if (overlapScore(pToks, oToks) < 0.55) return false;
+
+    // Differentiating model tokens (excluding base query & generic gender/unit words) must genuinely overlap!
+    const pDiff = modelDiffTokens(baseProduct.title);
+    const oDiff = modelDiffTokens(candidateOffer.offerTitle);
+    if (pDiff.size > 0 && oDiff.size > 0) {
+      let commonDiff = 0;
+      for (const t of pDiff) {
+        if (oDiff.has(t)) commonDiff++;
+      }
+      const unionDiff = new Set([...pDiff, ...oDiff]).size;
+      if (unionDiff > 0 && commonDiff / unionDiff < 0.5) return false;
+    }
+    return true;
+  };
+
+  // Sort priced cards: non-accessories first, then price ascending (so peerVariants are cheapest-first too)
+  products.sort((a, b) => {
+    if (a.isAccessory !== b.isAccessory) return a.isAccessory ? 1 : -1;
+    return (a.lowestPrice ?? Infinity) - (b.lowestPrice ?? Infinity);
+  });
+
+  // Cache detail view for every individual priced product card (strictly isolated to matching offers!)
   for (const p of products) {
-    const itemTokens = tokenize(p.title);
-    const similar = analysisPool.filter((o) => overlapScore(itemTokens, tokenize(o.offerTitle)) >= 0.4);
-    const pool = similar.length >= 2 ? similar : [p._offer, ...analysisPool.slice(0, 11)].filter(Boolean);
+    const matchingOffers = analysisPool.filter((o) => isSameVariantOffer(p, o));
     const dedup = [];
     const seen = new Set();
-    for (const o of pool) {
+    for (const o of [p._offer, ...matchingOffers]) {
       if (!o || seen.has(o.id)) continue;
       seen.add(o.id);
       dedup.push(o);
     }
+
     const uInfo = extractUnitInfo(p.title, p.lowestPrice);
     const itemAnalysis = analyzeOffers(dedup, uInfo);
+
+    // Other products/colors from this search become navigable internal variants (with their own images & prices!)
+    const peerVariants = products
+      .filter((other) => other.id !== p.id && !other.isAccessory)
+      .slice(0, 8)
+      .map((other) => ({
+        name: other.title.slice(0, 62),
+        price: other.lowestPrice,
+        seller: other.source,
+        color: other.variantAttrs?.color || null,
+        image: other.image || "",
+        url: other.url,
+        isAkakceUrl: false,
+        isInternalVirtual: true,
+      }));
+
+    const itemVerdict = {
+      ...aggregateDetail.verdict,
+      label: dedup.length >= 2 ? `${dedup.length} Mağazada Karşılaştırıldı` : `${p.source} Doğrudan Ürün`,
+      headline: itemAnalysis.stats
+        ? `Bu ürün için doğrulanmış net fiyat ${itemAnalysis.stats.minNet.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL (${itemAnalysis.picks?.cheapestNet?.store || p.source}).`
+        : aggregateDetail.verdict.headline,
+      reasons:
+        dedup.length >= 2 && itemAnalysis.stats
+          ? [
+              `Aynı ürün/varyant için ${dedup.length} mağaza teklifi karşılaştırıldı.`,
+              `Medyan fiyat ${itemAnalysis.stats.medianNet.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL.`,
+              "Mağazaya Git butonu sizi doğrudan bu ürünün sayfasına götürür.",
+            ]
+          : [
+              `${p.source} doğrudan ürün sayfasından alınan güncel fiyat bilgisidir.`,
+              ...(p.priceSource === "installment"
+                ? ["Fiyat, ilandaki peşin fiyatına taksit bilgisinden toplam tutar olarak hesaplanmıştır."]
+                : []),
+              "Diğer renk/modelleri aşağıdaki seçeneklerden kıyaslayabilirsiniz.",
+            ],
+    };
 
     saveVirtualDetail(p.url, {
       ...aggregateDetail,
@@ -703,7 +1431,8 @@ function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerNa
       title: p.title,
       searchQuery: query,
       url: p.url,
-      image: p.image || bestImage,
+      externalUrl: p.externalUrl,
+      image: p.image || (p.variantAttrs?.color ? "" : bestImage),
       totalOfferCount: dedup.length,
       unitInfo: uInfo ? extractUnitInfo(p.title, itemAnalysis.stats?.minNet ?? p.lowestPrice) : null,
       lowPrice: itemAnalysis.stats?.minNet ?? p.lowestPrice,
@@ -713,11 +1442,16 @@ function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerNa
       shippingTraps: itemAnalysis.shippingTraps,
       platformBreakdown: itemAnalysis.platformBreakdown,
       offers: itemAnalysis.offers,
+      verdict: itemVerdict,
+      variants: [...peerVariants, ...extraStoreVariants.slice(0, 4)],
     });
+  }
+
+  for (const p of products) {
     delete p._offer;
   }
 
-  // Add unpriced catalog links as browsable cards
+  // Add unpriced direct products & category/listing pages as clearly labeled catalog cards
   const catalogCards = catalogLinks.slice(0, 8).map((c) => {
     const cKey = `virtual:${prefix}:cat:${encodeURIComponent(query)}:${encodeURIComponent(c.id)}`;
     saveVirtualDetail(cKey, {
@@ -726,10 +1460,18 @@ function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerNa
       title: c.title,
       searchQuery: query,
       url: cKey,
-      image: c.image || bestImage,
+      externalUrl: c.url,
+      image: c.image || (c.variantAttrs?.color ? "" : bestImage),
       description: c.snippet,
       variants: [
-        { name: `${c.store} Sayfasına Git`, price: null, seller: c.store, url: c.url, isAkakceUrl: false },
+        {
+          name: c.isListingPage ? `${c.store} Kategori Sayfasına Git` : `${c.store} Ürün Sayfasına Git`,
+          price: null,
+          seller: c.store,
+          url: c.url,
+          isAkakceUrl: false,
+          isInternalVirtual: false,
+        },
         ...extraStoreVariants.filter((v) => v.url !== c.url),
       ],
     });
@@ -740,20 +1482,24 @@ function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerNa
       externalUrl: c.url,
       image: c.image,
       lowestPrice: null,
+      priceSource: null,
       offerCount: 1,
       badge: c.store,
       source: c.store,
       isOfficialStore: c.isOfficialStore,
       isFreeShipping: false,
       isAccessory: c.isAccessory,
+      isProductPage: c.isProductPage,
+      isListingPage: c.isListingPage,
+      variantAttrs: c.variantAttrs,
       unitInfo: null,
     };
   });
 
-  // Sort priced cards: non-accessories first, then price ascending
-  products.sort((a, b) => {
-    if (a.isAccessory !== b.isAccessory) return a.isAccessory ? 1 : -1;
-    return (a.lowestPrice ?? Infinity) - (b.lowestPrice ?? Infinity);
+  // Sort catalog cards: direct unpriced products before category/listing pages
+  catalogCards.sort((a, b) => {
+    if (a.isListingPage !== b.isListingPage) return a.isListingPage ? 1 : -1;
+    return 0;
   });
 
   const finalProducts = [
@@ -771,6 +1517,8 @@ function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerNa
             isOfficialStore: true,
             isFreeShipping: Boolean(analysis.picks?.cheapestNet?.shippingCost === 0),
             isAccessory: false,
+            isProductPage: true,
+            isListingPage: false,
             unitInfo: aggregateDetail.unitInfo,
           },
         ]
@@ -787,6 +1535,8 @@ function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerNa
     cached: false,
     totalFound: finalProducts.length,
     pricedFound: pricedOffers.length,
+    directProductCount: products.length,
+    listingCount: catalogCards.filter((c) => c.isListingPage).length,
     accessoryCount: finalProducts.filter((p) => p.isAccessory).length,
     products: finalProducts,
     aggregateUrl: analysisPool.length >= 2 ? aggregateKey : null,

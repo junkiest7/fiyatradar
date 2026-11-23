@@ -483,14 +483,23 @@ export async function getProductDetail(rawUrl, options = {}) {
   const category = ld?.category || "";
   const description = (ld?.description || "").replace(/\s+/g, " ").trim();
 
-  let image = "";
-  if (Array.isArray(ld?.image) && ld.image.length) {
-    image = typeof ld.image[0] === "string" ? ld.image[0] : ld.image[0]?.url || "";
-  } else if (typeof ld?.image === "string") {
-    image = ld.image;
-  } else {
-    image = $("meta[property='og:image']").attr("content") || "";
-  }
+  const extractLdImg = (imgField) => {
+    if (!imgField) return "";
+    if (typeof imgField === "string") return imgField;
+    if (Array.isArray(imgField)) {
+      for (const entry of imgField) {
+        const u = extractLdImg(entry);
+        if (u) return u;
+      }
+      return "";
+    }
+    if (typeof imgField === "object") {
+      return imgField.url || imgField.contentUrl || "";
+    }
+    return "";
+  };
+
+  let image = extractLdImg(ld?.image) || $("meta[property='og:image']").attr("content") || "";
   if (image.startsWith("//")) image = `https:${image}`;
 
   const rating = ld?.aggregateRating
@@ -714,10 +723,13 @@ export async function getProductDetail(rawUrl, options = {}) {
       const vOffer = Array.isArray(v.offers) ? v.offers[0] : v.offers;
       const vPrice = parseTrPrice(vOffer?.price);
       const vUrl = normalizeProductUrl(v["@id"] || v.url || "") || vOffer?.url || null;
+      let vImg = extractLdImg(v.image);
+      if (vImg.startsWith("//")) vImg = `https:${vImg}`;
       variants.push({
         name: v.name || "",
         price: vPrice,
         seller: vOffer?.seller?.name || "",
+        image: vImg,
         url: vUrl,
         isAkakceUrl: Boolean(vUrl && vUrl.includes("akakce.com")),
       });

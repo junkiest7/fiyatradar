@@ -222,7 +222,7 @@ app.get("/api/search", async (req, res) => {
       variantAttrs:
         p.badge === "Tüm Mağazalar"
           ? { capacity: null, color: null, size: null, volume: null }
-          : p.variantAttrs || extractVariantAttributes(p.title),
+          : p.variantAttrs || extractVariantAttributes(p.title, p.isListingPage ? "" : p.externalUrl || ""),
     }));
 
     res.json({

@@ -448,40 +448,129 @@ const COLOR_RULES = [
   ["Gece Yarısı", /\b(gece\s+yarisi|midnight)\b/i],
   ["Yıldız Işığı", /\b(yildiz\s+isigi|starlight)\b/i],
   ["Uzay Grisi", /\b(uzay\s+grisi|space\s+gr[ae]y)\b/i],
+  ["Kırık Beyaz", /\b(kirik\s+beyaz|off\s*-?\s*white)\b/i],
+  ["Saks Mavisi", /\b(saks(?:\s+mavisi)?|cobalt)\b/i],
+  ["Su Yeşili", /\b(su\s+yesili|aqua)\b/i],
+  ["Çağla", /\b(cagla(?:\s+yesili)?)\b/i],
   ["Siyah", /\b(siyah|black|obsidian|graphite|grafit|jet\s+black)\b/i],
   ["Beyaz", /\b(beyaz|white|pearl|inci)\b/i],
   ["Lacivert", /\b(lacivert|navy)\b/i],
+  ["İndigo", /\b(indigo)\b/i],
   ["Mavi", /\b(mavi|blue|ultramarine|teal|turkuaz|buz\s+mavisi|gok\s+mavisi)\b/i],
   ["Yeşil", /\b(yesil|green|mint|ada\s+cayi|sage|zumrut)\b/i],
   ["Kırmızı", /\b(kirmizi|red)\b/i],
   ["Bordo", /\b(bordo|burgundy|visne)\b/i],
+  ["Pudra", /\b(pudra|powder)\b/i],
   ["Pembe", /\b(pembe|pink|rose|gul\s+kurusu|fusya)\b/i],
   ["Mor", /\b(mor|purple|violet)\b/i],
   ["Lila", /\b(lila|lavanta|lavender)\b/i],
+  ["Hardal", /\b(hardal|mustard)\b/i],
   ["Sarı", /\b(sari|yellow)\b/i],
   ["Turuncu", /\b(turuncu|orange|mercan|coral)\b/i],
   ["Altın", /\b(altin|gold)\b/i],
   ["Gümüş", /\b(gumus|silver)\b/i],
+  ["Füme", /\b(fume|smoke)\b/i],
   ["Antrasit", /\b(antrasit|anthracite)\b/i],
   ["Gri", /\b(gri|gr[ae]y)\b/i],
+  ["Taş", /\b(tas\s+rengi|stone)\b/i],
   ["Bej", /\b(bej|beige)\b/i],
   ["Ekru", /\b(ekru|ecru)\b/i],
   ["Krem", /\b(krem|cream)\b/i],
   ["Vizon", /\b(vizon|taupe)\b/i],
-  ["Taba", /\b(taba|camel|konyak)\b/i],
+  ["Taba", /\b(taba|camel|kamel|konyak)\b/i],
   ["Kahverengi", /\b(kahverengi|kahve|brown|cikolata|havana)\b/i],
   ["Haki", /\b(haki|khaki|olive)\b/i],
 ];
 
+const COLOR_FAMILY_MAP = {
+  "siyah titanyum": "siyah",
+  "gece yarısı": "siyah",
+  "siyah": "siyah",
+  "beyaz titanyum": "beyaz",
+  "kırık beyaz": "beyaz",
+  "yıldız ışığı": "beyaz",
+  "beyaz": "beyaz",
+  "uzay grisi": "gri",
+  "antrasit": "gri",
+  "füme": "gri",
+  "gri": "gri",
+  "saks mavisi": "mavi",
+  "indigo": "mavi",
+  "lacivert": "lacivert",
+  "mavi": "mavi",
+  "su yeşili": "yeşil",
+  "çağla": "yeşil",
+  "yeşil": "yeşil",
+  "haki": "haki",
+  "pudra": "pembe",
+  "pembe": "pembe",
+  "bordo": "bordo",
+  "kırmızı": "kırmızı",
+  "hardal": "sarı",
+  "sarı": "sarı",
+  "krem": "ekru",
+  "ekru": "ekru",
+  "bej": "bej",
+  "taş": "bej",
+  "taba": "kahverengi",
+  "kahverengi": "kahverengi",
+};
+
+/**
+ * Extracts a canonical Turkish color label from arbitrary text (product title, image alt, URL slug).
+ * @param {string} text
+ * @returns {string|null}
+ */
+export function extractColorFromText(text) {
+  const raw = String(text || "");
+  if (!raw) return null;
+  const lower = transliterateTr(raw).replace(/[-_/]+/g, " ").toLowerCase();
+  for (const [label, regex] of COLOR_RULES) {
+    if (regex.test(lower)) {
+      return label;
+    }
+  }
+  return null;
+}
+
+/**
+ * Checks whether two detected color labels are compatible (same color or shade within same family).
+ * Used to strictly block color-mismatched photos (e.g., showing a Black shirt for a White/Green listing).
+ * @param {string|null} colorA
+ * @param {string|null} colorB
+ * @returns {boolean}
+ */
+export function areColorsCompatible(colorA, colorB) {
+  if (!colorA || !colorB) return true;
+  const a = String(colorA).toLocaleLowerCase("tr-TR").trim();
+  const b = String(colorB).toLocaleLowerCase("tr-TR").trim();
+  if (a === b) return true;
+  const famA = COLOR_FAMILY_MAP[a] || a;
+  const famB = COLOR_FAMILY_MAP[b] || b;
+  return famA === famB;
+}
+
+function cleanUrlSlugForAttrs(urlHint) {
+  if (!urlHint || typeof urlHint !== "string") return "";
+  try {
+    const u = new URL(urlHint);
+    return decodeURIComponent(u.pathname).replace(/[-_/]+/g, " ");
+  } catch {
+    return urlHint.replace(/[-_/]+/g, " ");
+  }
+}
+
 /**
  * Extracts structured variant attributes (capacity, color, size, volume) from a Turkish product title
- * for one-tap variant grouping and "which color/capacity is cheapest?" comparison.
+ * (with optional direct-product URL slug fallback) for one-tap variant grouping and
+ * "which color/capacity is cheapest?" comparison.
  * @param {string} title
+ * @param {string} [urlHint]
  * @returns {{ capacity: string|null, color: string|null, size: string|null, volume: string|null }}
  */
-export function extractVariantAttributes(title) {
+export function extractVariantAttributes(title, urlHint = "") {
   const raw = String(title || "");
-  if (!raw) return { capacity: null, color: null, size: null, volume: null };
+  if (!raw && !urlHint) return { capacity: null, color: null, size: null, volume: null };
   const ascii = transliterateTr(raw);
   const lower = ascii.toLowerCase();
 
@@ -503,13 +592,7 @@ export function extractVariantAttributes(title) {
   }
 
   // 2. Color (match specific multi-word shades like "Çöl Titanyum" before generic "Titanyum"/"Siyah")
-  let color = null;
-  for (const [label, regex] of COLOR_RULES) {
-    if (regex.test(lower)) {
-      color = label;
-      break;
-    }
-  }
+  let color = extractColorFromText(raw);
 
   // 3. Size (Shoe EU 35-46 or Clothing XXS-3XL in fashion context)
   let size = null;
@@ -543,6 +626,20 @@ export function extractVariantAttributes(title) {
     }
   }
 
+  // Optional direct-product URL slug fallback (fills in color/volume/capacity when omitted from title)
+  if (urlHint && (!color || !capacity || !volume)) {
+    const slugText = cleanUrlSlugForAttrs(urlHint);
+    if (slugText) {
+      if (!color) color = extractColorFromText(slugText);
+      if (!capacity || !volume) {
+        const slugAttrs = extractVariantAttributes(slugText);
+        if (!capacity && slugAttrs.capacity) capacity = slugAttrs.capacity;
+        if (!volume && slugAttrs.volume) volume = slugAttrs.volume;
+      }
+    }
+  }
+
   return { capacity, color, size, volume };
 }
+
 

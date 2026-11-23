@@ -2980,13 +2980,88 @@ html[data-theme="dark"] .pick-card.primary-pick {
   background: linear-gradient(180deg, rgba(16, 185, 129, 0.16) 0%, var(--bg-surface) 50%);
 }
 
-html[data-theme="dark"] .offers-table tbody tr.cheapest-row {
-  background: rgba(16, 185, 129, 0.11);
+html[data-theme="dark"] .offers-table tbody tr.row-best,
+html[data-theme="dark"] .offers-table tbody tr.cheapest-row,
+html[data-theme="dark"] .mobile-offer-card.row-best {
+  background: rgba(16, 185, 129, 0.12);
 }
 
 html[data-theme="dark"] .watch-card.target-hit {
   background: rgba(16, 185, 129, 0.11);
   border-color: var(--good-border);
+}
+
+/* Color Swatches, Variant Thumbnails & Favicon Fallback Polish */
+.color-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex-shrink: 0;
+  border: 1px solid rgba(20, 21, 23, 0.18);
+  vertical-align: middle;
+}
+
+.color-swatch.light-swatch {
+  border-color: rgba(20, 21, 23, 0.38);
+}
+
+.color-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--ink-secondary);
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
+.product-card-media img.is-favicon {
+  width: 44px;
+  height: 44px;
+  opacity: 0.82;
+}
+
+.variant-chip.has-thumb {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  max-width: 320px;
+}
+
+.variant-thumb {
+  width: 46px;
+  height: 46px;
+  object-fit: contain;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px;
+  flex-shrink: 0;
+}
+
+.variant-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.variant-info .variant-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.product-card-actions-mini {
+  flex-wrap: wrap;
+}
+
+.product-card-actions-mini .btn {
+  flex: 1 1 auto;
 }
 
 html[data-theme="dark"] .product-card-media,

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  areColorsCompatible,
   extractUnitInfo,
   extractVariantAttributes,
   isAccessoryTitle,
@@ -14,8 +15,11 @@ import {
 import { analyzeOffers, analyzePriceHistory } from "../src/analyzer.js";
 import { getProductDetail, searchProducts } from "../src/scraper.js";
 import {
+  buildTurkeySearchResponse,
+  classifyStoreUrl,
   extractOrganicPriceInfo,
   getVirtualDetail,
+  pickBestProductImage,
   resolveBarcode,
   resolveStoreFromUrl,
   searchOfficialFallback,
@@ -350,3 +354,255 @@ test("isPrivateOrReservedIp blocks loopback, link-local, and RFC1918 addresses w
   assert.equal(isPrivateOrReservedIp("8.8.8.8"), false);
   assert.equal(isPrivateOrReservedIp("104.18.2.1"), false);
 });
+
+test("classifyStoreUrl separates direct product pages from category/search listing pages across Turkish stores", () => {
+  // Trendyol: category/search vs direct product (-p-<id>)
+  const tyCat = classifyStoreUrl("https://www.trendyol.com/zara-erkek-parfum-x-b101476-c103706", "Zara Erkek Parfüm Modelleri ve Fiyatları");
+  assert.equal(tyCat.isListingPage, true);
+  assert.equal(tyCat.isProductPage, false);
+
+  const tySearch = classifyStoreUrl("https://www.trendyol.com/sr?q=zara+erkek+parfumeri");
+  assert.equal(tySearch.isListingPage, true);
+  assert.equal(tySearch.isProductPage, false);
+
+  const tyProd = classifyStoreUrl("https://www.trendyol.com/zara/vibrant-leather-edp-100-ml-p-34055913");
+  assert.equal(tyProd.isProductPage, true);
+  assert.equal(tyProd.isListingPage, false);
+  assert.equal(tyProd.productId, "ty:34055913");
+
+  // Hepsiburada
+  assert.equal(classifyStoreUrl("https://www.hepsiburada.com/zara-parfumler-xc-341414").isListingPage, true);
+  assert.equal(classifyStoreUrl("https://www.hepsiburada.com/ara?q=zara+parfum").isListingPage, true);
+  const hbProd = classifyStoreUrl("https://www.hepsiburada.com/zara-seoul-100-ml-p-HBCV000012345");
+  assert.equal(hbProd.isProductPage, true);
+  assert.equal(hbProd.productId, "hb:hbcv000012345");
+
+  // Amazon TR & n11
+  assert.equal(classifyStoreUrl("https://www.amazon.com.tr/s?k=zara+parfum").isListingPage, true);
+  assert.equal(classifyStoreUrl("https://www.amazon.com.tr/Zara-Vibrant-Leather/dp/B08XYZ1234").isProductPage, true);
+  assert.equal(classifyStoreUrl("https://www.n11.com/arama?q=zara+parfum").isListingPage, true);
+  assert.equal(classifyStoreUrl("https://www.n11.com/urun/zara-seoul-edt-100-ml-48291023").isProductPage, true);
+
+  // Zara & Stradivarius & Akakçe
+  assert.equal(classifyStoreUrl("https://www.zara.com/tr/tr/erkek-aksesuar-parfum-l551.html").isListingPage, true);
+  assert.equal(classifyStoreUrl("https://www.zara.com/tr/tr/red-vanilla-90-ml-p20110510.html").isProductPage, true);
+  assert.equal(classifyStoreUrl("https://www.stradivarius.com/tr/kadin/giyim/gomlekler-n1980").isListingPage, true);
+  assert.equal(classifyStoreUrl("https://www.stradivarius.com/tr/poplin-gomlek-l19234370").isProductPage, true);
+  assert.equal(classifyStoreUrl("https://www.akakce.com/parfum/zara.html").isListingPage, true);
+  assert.equal(classifyStoreUrl("https://www.akakce.com/parfum/en-ucuz-zara-man-silver-fiyati,105786078.html").isProductPage, true);
+});
+
+test("extractOrganicPriceInfo rejects listing minimums, monthly installments, wide ranges, and shipping thresholds", () => {
+  // 1. Trendyol category/search page with misleading 552 TL must NOT be priced
+  const catItem = extractOrganicPriceInfo({
+    title: "Zara Erkek Parfümeri Modelleri ve Fiyatları - Trendyol",
+    link: "https://www.trendyol.com/zara-erkek-parfum-x-b101476-c103706",
+    price: 552,
+    snippet: "Zara erkek parfüm çeşitleri 552 TL'den başlayan fiyatlarla Trendyol'da!",
+  });
+  assert.equal(catItem.price, null);
+  assert.equal(catItem.source, "listing");
+
+  // 2. Monthly installment without interest-free guarantee ("ayda 552 TL" / "3 taksitle ayda 552 TL") -> NEVER return 552
+  const monthlyOnly = extractOrganicPriceInfo({
+    title: "Zara Vibrant Leather EDP 100 ml - Trendyol",
+    link: "https://www.trendyol.com/zara/vibrant-leather-edp-100-ml-p-34055913",
+    snippet: "3 taksitle ayda 552,00 TL'den başlayan taksitlerle. Ücretsiz kargo.",
+  });
+  assert.equal(monthlyOnly.price, null);
+
+  // 3. Interest-free "Peşin fiyatına 3 taksit 552,00 TL" -> returns total cash price 1656 TL, NOT 552 TL
+  const interestFreeInst = extractOrganicPriceInfo({
+    title: "Zara Vibrant Leather EDP 100 ml - Trendyol",
+    link: "https://www.trendyol.com/zara/vibrant-leather-edp-100-ml-p-34055913",
+    snippet: "Peşin fiyatına 3 taksit 552,00 TL.",
+  });
+  assert.equal(interestFreeInst.price, 1656);
+  assert.equal(interestFreeInst.source, "installment");
+
+  // 4. Rich item.price accidentally scraped as monthly installment 552 while cash price 1.656 TL is in snippet
+  const badRichInst = extractOrganicPriceInfo({
+    title: "Zara Vibrant Leather EDP 100 ml - Trendyol",
+    link: "https://www.trendyol.com/zara/vibrant-leather-edp-100-ml-p-34055913",
+    price: 552,
+    snippet: "1.656,00 TL. Peşin fiyatına 3x 552,00 TL taksit imkanı.",
+  });
+  assert.equal(badRichInst.price, 1656);
+  assert.equal(badRichInst.source, "snippet");
+
+  // 5. Pattern B ("₺") respects shipping threshold ("ve üzeri") and installment filters ("₺552 x 6")
+  const patternB = extractOrganicPriceInfo({
+    title: "Zara Seoul 100 ml",
+    link: "https://www.hepsiburada.com/zara-seoul-100-ml-p-HBCV00001",
+    snippet: "₺500 ve üzeri kargo bedava! ₺552 x 6 taksit. ₺1.890,00",
+  });
+  assert.equal(patternB.price, 1890);
+
+  // 6. Wide priceRange ("552 TL - 3.499 TL") is rejected instead of showing 552 TL
+  const wideRange = extractOrganicPriceInfo({
+    title: "Zara Parfüm Seti",
+    link: "https://www.trendyol.com/zara/parfum-seti-p-99999",
+    priceRange: "552 TL - 3.499 TL",
+    snippet: "552 TL - 3.499 TL arası seçenekler.",
+  });
+  assert.equal(wideRange.price, null);
+
+  // 7. Shipping threshold "500 TL ve üzeri kargo bedava" & large installment >= 2000 TL skipped
+  const bigInst = extractOrganicPriceInfo({
+    title: "Apple iPhone 17 256 GB",
+    link: "https://www.trendyol.com/apple/iphone-17-256gb-p-123456",
+    snippet: "500 TL ve üzeri kargo bedava. 2.500 TL x 12 taksit. 28.999,00 TL",
+  });
+  assert.equal(bigInst.price, 28999);
+});
+
+test("pickBestProductImage matches exact colors (Siyah/Beyaz/Yeşil), blocks color conflicts, and deduplicates photos", () => {
+  assert.equal(areColorsCompatible("Siyah", "Beyaz"), false);
+  assert.equal(areColorsCompatible("Siyah", "Yeşil"), false);
+  assert.equal(areColorsCompatible("Beyaz", "Kırık Beyaz"), true);
+
+  // Simulate Stradivarius gömlek pool where Siyah is listed FIRST on trendyol.com!
+  const pool = [
+    {
+      title: "Stradivarius Siyah Poplin Gömlek - Trendyol",
+      link: "https://www.trendyol.com/stradivarius/siyah-poplin-gomlek-p-111",
+      thumbnailUrl: "https://img.example.com/siyah-1.jpg",
+    },
+    {
+      title: "Stradivarius Siyah Keten Gömlek - Trendyol",
+      link: "https://www.trendyol.com/stradivarius/siyah-keten-gomlek-p-112",
+      thumbnailUrl: "https://img.example.com/siyah-2.jpg",
+    },
+    {
+      title: "Stradivarius Beyaz Poplin Gömlek - Trendyol",
+      link: "https://www.trendyol.com/stradivarius/beyaz-poplin-gomlek-p-222",
+      thumbnailUrl: "https://img.example.com/beyaz-1.jpg",
+      _hintColor: "Beyaz",
+    },
+    {
+      title: "Stradivarius Yeşil Keten Gömlek - Stradivarius",
+      link: "https://www.stradivarius.com/tr/yesil-keten-gomlek-l02135421",
+      thumbnailUrl: "https://img.example.com/yesil-1.jpg",
+      _hintColor: "Yeşil",
+    },
+  ];
+
+  const used = new Set();
+  const imgBlack1 = pickBestProductImage(
+    {
+      title: "Stradivarius Siyah Poplin Gömlek",
+      url: "https://www.trendyol.com/stradivarius/siyah-poplin-gomlek-p-111",
+      host: "trendyol.com",
+      productId: "ty:111",
+      color: "Siyah",
+      slug: "stradivarius siyah poplin gomlek p 111",
+    },
+    pool,
+    used,
+    "stradivarius gomlek"
+  );
+  const imgWhite = pickBestProductImage(
+    {
+      title: "Stradivarius Beyaz Poplin Gömlek",
+      url: "https://www.trendyol.com/stradivarius/beyaz-poplin-gomlek-p-999",
+      host: "trendyol.com",
+      productId: "ty:999",
+      color: "Beyaz",
+      slug: "stradivarius beyaz poplin gomlek p 999",
+    },
+    pool,
+    used,
+    "stradivarius gomlek"
+  );
+  const imgGreen = pickBestProductImage(
+    {
+      title: "Stradivarius Yeşil Keten Gömlek",
+      url: "https://www.trendyol.com/stradivarius/yesil-keten-gomlek-p-888",
+      host: "trendyol.com",
+      productId: "ty:888",
+      color: "Yeşil",
+      slug: "stradivarius yesil keten gomlek p 888",
+    },
+    pool,
+    used,
+    "stradivarius gomlek"
+  );
+  const imgBlack2 = pickBestProductImage(
+    {
+      title: "Stradivarius Siyah Keten Gömlek",
+      url: "https://www.trendyol.com/stradivarius/siyah-keten-gomlek-p-777",
+      host: "trendyol.com",
+      productId: "ty:777",
+      color: "Siyah",
+      slug: "stradivarius siyah keten gomlek p 777",
+    },
+    pool,
+    used,
+    "stradivarius gomlek"
+  );
+
+  assert.equal(imgBlack1, "https://img.example.com/siyah-1.jpg");
+  assert.equal(imgWhite, "https://img.example.com/beyaz-1.jpg");
+  assert.equal(imgGreen, "https://img.example.com/yesil-1.jpg");
+  assert.equal(imgBlack2, "https://img.example.com/siyah-2.jpg");
+
+  // Hard conflict guard: if pool ONLY contains black shirt images, a purple shirt MUST NOT get a black photo!
+  const blackOnlyPool = [pool[0]];
+  const imgPurple = pickBestProductImage(
+    {
+      title: "Stradivarius Mor Poplin Gömlek",
+      url: "https://www.trendyol.com/stradivarius/mor-poplin-gomlek-p-555",
+      host: "trendyol.com",
+      productId: "ty:555",
+      color: "Mor",
+      slug: "stradivarius mor poplin gomlek p 555",
+    },
+    blackOnlyPool,
+    new Set(),
+    "stradivarius gomlek"
+  );
+  assert.equal(imgPurple, "");
+});
+
+test("buildTurkeySearchResponse isolates direct Zara perfume products from Trendyol listing pages & prevents cross-product hijacking", () => {
+  const rawOrganic = [
+    {
+      title: "Zara Erkek Parfümeri Modelleri ve Fiyatları - Trendyol",
+      link: "https://www.trendyol.com/zara-erkek-parfum-x-b101476-c103706",
+      price: 552,
+      snippet: "Zara erkek parfüm 552 TL'den başlayan fiyatlarla!",
+    },
+    {
+      title: "Zara Vibrant Leather EDP 100 ml Erkek Parfüm - Trendyol",
+      link: "https://www.trendyol.com/zara/vibrant-leather-edp-100-ml-p-34055913",
+      snippet: "Zara Vibrant Leather EDP 100 ml. 1.650,00 TL. Ücretsiz Kargo.",
+    },
+    {
+      title: "Zara Seoul EDT 100 ml Erkek Parfüm - Hepsiburada",
+      link: "https://www.hepsiburada.com/zara-seoul-edt-100-ml-p-HBCV000012345",
+      snippet: "Zara Seoul EDT 100 ml Erkek Parfüm. 1.450,00 TL. Ücretsiz Kargo.",
+    },
+  ];
+
+  const resp = buildTurkeySearchResponse("zara parfüm", rawOrganic, [], "Google Türkiye (Serper)", "serper");
+  const listingCard = resp.products.find((p) => p.externalUrl?.includes("x-b101476"));
+  const vibrantCard = resp.products.find((p) => p.externalUrl?.includes("-p-34055913"));
+  const seoulCard = resp.products.find((p) => p.externalUrl?.includes("-p-HBCV000012345"));
+
+  // Category page MUST NOT get a fake 552 TL price
+  assert.ok(listingCard);
+  assert.equal(listingCard.isListingPage, true);
+  assert.equal(listingCard.lowestPrice, null);
+
+  // Direct products MUST get their real cash prices and direct product URLs
+  assert.equal(vibrantCard.lowestPrice, 1650);
+  assert.equal(vibrantCard.isProductPage, true);
+  assert.equal(seoulCard.lowestPrice, 1450);
+
+  // Detail view for Vibrant Leather MUST point to Vibrant Leather's own URL & price, NOT hijacked by Seoul!
+  const vibrantDetail = getVirtualDetail(vibrantCard.url);
+  assert.equal(vibrantDetail.picks.cheapestNet.netPrice, 1650);
+  assert.equal(vibrantDetail.picks.cheapestNet.url, "https://www.trendyol.com/zara/vibrant-leather-edp-100-ml-p-34055913");
+  assert.ok(vibrantDetail.variants.some((v) => v.isInternalVirtual && v.url === seoulCard.url));
+});
+

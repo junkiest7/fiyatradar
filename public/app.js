@@ -21,6 +21,7 @@ const state = {
   searchData: null,
   searchFilters: {
     hideAccessories: true,
+    hideListings: true,
     pricedOnly: false,
     officialOnly: false,
     freeShippingOnly: false,
@@ -588,11 +589,17 @@ async function performSearch(query, opts = {}) {
     }
 
     state.searchData = data;
-    // Reset per-search quick filters cleanly; hide accessories automatically when non-accessories exist
-    const hasAccessories = (data.products || []).some((p) => p.isAccessory);
-    const hasPrimary = (data.products || []).some((p) => !p.isAccessory);
+    // Reset per-search quick filters cleanly; auto-hide accessories and category/listing pages when direct priced products exist
+    const allProds = data.products || [];
+    const hasAccessories = allProds.some((p) => p.isAccessory);
+    const hasPrimary = allProds.some((p) => !p.isAccessory);
+    const hasListings = allProds.some((p) => p.isListingPage);
+    const directPricedCount = allProds.filter(
+      (p) => !p.isListingPage && p.badge !== "Tüm Mağazalar" && typeof p.lowestPrice === "number" && p.lowestPrice > 0
+    ).length;
     state.searchFilters = {
       hideAccessories: hasAccessories && hasPrimary,
+      hideListings: hasListings && directPricedCount >= 2,
       pricedOnly: false,
       officialOnly: false,
       freeShippingOnly: false,
@@ -607,11 +614,67 @@ async function performSearch(query, opts = {}) {
   }
 }
 
+const COLOR_SWATCH_MAP = {
+  siyah: "#18181b",
+  "siyah titanyum": "#27272a",
+  "gece yarısı": "#1e293b",
+  beyaz: "#ffffff",
+  "beyaz titanyum": "#f4f4f5",
+  "kırık beyaz": "#f7f5ef",
+  "yıldız ışığı": "#f5f1e6",
+  ekru: "#f3ead8",
+  krem: "#f5ebd6",
+  bej: "#d6c5a9",
+  taş: "#cfc8bc",
+  vizon: "#a89888",
+  taba: "#b56c3b",
+  kahverengi: "#6f4528",
+  haki: "#5b643b",
+  yeşil: "#16a34a",
+  "su yeşili": "#5eead4",
+  çağla: "#86b08c",
+  lacivert: "#1e3a8a",
+  indigo: "#3730a3",
+  "saks mavisi": "#1d4ed8",
+  mavi: "#3b82f6",
+  kırmızı: "#dc2626",
+  bordo: "#7f1d1d",
+  pembe: "#ec4899",
+  pudra: "#f5c2cf",
+  mor: "#7c3aed",
+  lila: "#c084fc",
+  sarı: "#eab308",
+  hardal: "#ca8a04",
+  turuncu: "#f97316",
+  altın: "#d4af37",
+  gümüş: "#cbd5e1",
+  gri: "#9ca3af",
+  antrasit: "#4b5563",
+  füme: "#52525b",
+  "uzay grisi": "#52525b",
+  "çöl titanyum": "#c5a98c",
+  "doğal titanyum": "#b7b2a8",
+  titanyum: "#9ca3af",
+};
+
+function renderColorSwatch(colorLabel) {
+  if (!colorLabel) return "";
+  const hex = COLOR_SWATCH_MAP[String(colorLabel).toLocaleLowerCase("tr-TR").trim()];
+  if (!hex) return "";
+  const needsDarkBorder = ["#ffffff", "#f4f4f5", "#f7f5ef", "#f5f1e6", "#f3ead8", "#f5ebd6"].includes(hex);
+  return `<span class="color-swatch ${needsDarkBorder ? "light-swatch" : ""}" style="background:${hex};" aria-hidden="true"></span>`;
+}
+
+function isFaviconUrl(urlStr) {
+  return typeof urlStr === "string" && /google\.com\/s2\/favicons/i.test(urlStr);
+}
+
 function getFilteredSearchProducts() {
   const all = state.searchData?.products || [];
   const f = state.searchFilters;
   return all.filter((p) => {
     if (f.hideAccessories && p.isAccessory) return false;
+    if (f.hideListings && p.isListingPage) return false;
     if (f.pricedOnly && !(typeof p.lowestPrice === "number" && p.lowestPrice > 0)) return false;
     if (f.officialOnly && !p.isOfficialStore) return false;
     if (f.freeShippingOnly && !p.isFreeShipping) return false;
@@ -631,7 +694,12 @@ function renderVariantGroupBar() {
   if (!els.variantGroupBar) return;
   const all = state.searchData?.products || [];
   const f = state.searchFilters;
-  const pool = all.filter((p) => (!f.hideAccessories || !p.isAccessory) && p.badge !== "Tüm Mağazalar");
+  const pool = all.filter(
+    (p) =>
+      (!f.hideAccessories || !p.isAccessory) &&
+      (!f.hideListings || !p.isListingPage) &&
+      p.badge !== "Tüm Mağazalar"
+  );
   if (pool.length < 2) {
     els.variantGroupBar.hidden = true;
     els.variantGroupBar.innerHTML = "";
@@ -670,10 +738,11 @@ function renderVariantGroupBar() {
       .map(([val, info]) => {
         const isActive = f.variantAttr?.group === def.key && f.variantAttr?.value === val;
         const isKelepir = Number.isFinite(info.minPrice) && info.minPrice === globalMin && Number.isFinite(globalMin);
+        const swatch = def.key === "color" ? renderColorSwatch(val) : "";
         const priceTag = Number.isFinite(info.minPrice)
           ? `<span class="vg-price">${new Intl.NumberFormat("tr-TR", { maximumFractionDigits: 0 }).format(info.minPrice)} TL${isKelepir ? " ★" : ""}</span>`
           : `<span class="vg-price">(${info.count})</span>`;
-        return `<button type="button" class="variant-group-chip ${isKelepir ? "kelepir" : ""} ${isActive ? "active" : ""}" data-vgroup="${esc(def.key)}" data-vval="${esc(val)}">${esc(val)} ${priceTag}</button>`;
+        return `<button type="button" class="variant-group-chip ${isKelepir ? "kelepir" : ""} ${isActive ? "active" : ""}" data-vgroup="${esc(def.key)}" data-vval="${esc(val)}">${swatch}${esc(val)} ${priceTag}</button>`;
       })
       .join("");
 
@@ -706,6 +775,7 @@ function renderQuickFilterBar() {
 
   const f = state.searchFilters;
   const accCount = all.filter((p) => p.isAccessory).length;
+  const listingCount = all.filter((p) => p.isListingPage).length;
   const freeShipCount = all.filter((p) => p.isFreeShipping).length;
   const pricedCount = all.filter((p) => typeof p.lowestPrice === "number" && p.lowestPrice > 0).length;
 
@@ -723,9 +793,14 @@ function renderQuickFilterBar() {
   const chips = [];
   const anyActive = f.pricedOnly || f.officialOnly || f.freeShippingOnly || Boolean(f.store) || Boolean(f.variantAttr);
   chips.push(
-    `<button type="button" class="filter-chip ${!anyActive && !f.hideAccessories ? "active" : ""}" data-qfilter="reset">Tümü (${all.length})</button>`
+    `<button type="button" class="filter-chip ${!anyActive && !f.hideAccessories && !f.hideListings ? "active" : ""}" data-qfilter="reset">Tümü (${all.length})</button>`
   );
 
+  if (listingCount > 0) {
+    chips.push(
+      `<button type="button" class="filter-chip ${f.hideListings ? "good-active" : ""}" data-qfilter="hideListings">${f.hideListings ? "✓ " : ""}Kategori Sayfalarını Gizle (${listingCount})</button>`
+    );
+  }
   if (accCount > 0) {
     chips.push(
       `<button type="button" class="filter-chip ${f.hideAccessories ? "good-active" : ""}" data-qfilter="hideAccessories">${f.hideAccessories ? "✓ " : ""}Aksesuarları Gizle (${accCount})</button>`
@@ -804,7 +879,7 @@ function renderSearchResults() {
         <h3>Eşleşen ürün bulunamadı</h3>
         <p>${
           data.products.length > 0
-            ? "Seçili mağaza veya aksesuar filtresi sonuçları gizledi. Yukarıdaki 'Tümü' çipine dokunarak tüm sonuçları görebilirsiniz."
+            ? "Seçili mağaza, kategori veya aksesuar filtresi sonuçları gizledi. Yukarıdaki 'Tümü' çipine dokunarak tüm sonuçları görebilirsiniz."
             : data.fallbackMode
               ? "Bu ürün Migros Elektronik / T.C. Market Fiyatı kataloğunda bulunamadı. Trendyol, Hepsiburada, Amazon TR, n11, Stradivarius ve MediaMarkt dahil tüm Türkiye mağazalarını taramak için Ayarlar'dan ücretsiz Serper API anahtarı ekleyebilirsiniz."
               : "Fiyat filtresini gevşetmeyi veya daha genel bir model adı denemeyi düşünün."
@@ -820,28 +895,43 @@ function renderSearchResults() {
       const inCompare = state.compareBasket.some((c) => c.url === p.url);
       const inCart = state.cart.some((c) => c.url === p.url);
       const isCatalogOnly = !p.lowestPrice && Boolean(p.externalUrl);
+      const hasDirectProductLink = Boolean(p.externalUrl && !p.isListingPage && !isCatalogOnly);
+      const imgIsFavicon = isFaviconUrl(p.image);
+      const colorLabel = p.variantAttrs?.color || "";
       return `
         <article class="product-card" data-url="${esc(p.url)}">
-          <div class="product-card-media" data-action="open-detail">
-            ${p.image ? `<img src="${esc(p.image)}" alt="${esc(p.title)}" loading="lazy" />` : `<span class="muted-text">Görsel yok</span>`}
+          <div class="product-card-media ${imgIsFavicon ? "is-favicon-wrap" : ""}" data-action="open-detail">
+            ${
+              p.image
+                ? `<img src="${esc(p.image)}" alt="${esc(p.title)}" class="${imgIsFavicon ? "is-favicon" : ""}" loading="lazy" />`
+                : `<span class="muted-text">Görsel yok</span>`
+            }
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:5px;align-items:center;">
             ${p.badge ? `<span class="offer-pill">${esc(p.badge)}</span>` : ""}
+            ${colorLabel ? `<span class="color-tag">${renderColorSwatch(colorLabel)}${esc(colorLabel)}</span>` : ""}
+            ${p.isListingPage ? `<span class="mini-badge fast">Kategori Sayfası</span>` : ""}
+            ${p.priceSource === "installment" ? `<span class="mini-badge fast" title="Peşin fiyatına taksit bilgisinden toplam tutar olarak hesaplandı">Peşin Toplam</span>` : ""}
             ${p.isAccessory ? `<span class="mini-badge trap">Aksesuar</span>` : ""}
           </div>
           <h3 class="product-card-title" data-action="open-detail" title="${esc(p.title)}">${esc(p.title)}</h3>
           ${p.unitInfo ? `<div class="unit-pill" title="Otomatik birim maliyet (${esc(p.unitInfo.rawMatch)})">${esc(p.unitInfo.formatted)}</div>` : ""}
           <div class="product-card-pricing">
-            <span class="price-main">${p.lowestPrice ? fmtTL(p.lowestPrice) : "Mağazada Gör"}</span>
+            <span class="price-main">${p.lowestPrice ? fmtTL(p.lowestPrice) : p.isListingPage ? "Kategoride Gör" : "Mağazada Gör"}</span>
             <span class="offer-pill">${p.offerCount > 1 ? `${p.offerCount} satıcı` : p.source ? esc(p.source) : "1 satıcı"}</span>
           </div>
           <div class="product-card-footer">
             ${
               isCatalogOnly
-                ? `<a href="${esc(p.externalUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm btn-analyze">Mağazada Aç ↗</a>`
+                ? `<a href="${esc(p.externalUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm btn-analyze">${p.isListingPage ? "Kategoride Gör ↗" : "Ürüne Git ↗"}</a>`
                 : `<button type="button" class="btn btn-primary btn-sm btn-analyze" data-action="open-detail">Detaylı Analiz</button>`
             }
             <div class="product-card-actions-mini">
+              ${
+                hasDirectProductLink
+                  ? `<a href="${esc(p.externalUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-good btn-sm" title="Doğrudan ürün sayfasını aç">Ürüne Git ↗</a>`
+                  : ""
+              }
               <button type="button" class="btn btn-secondary btn-sm btn-cart-toggle ${inCart ? "selected" : ""}" data-action="toggle-cart" title="Sepet maliyet optimizatörüne ekle">
                 ${inCart ? "✓ Sepet" : "+ Sepet"}
               </button>
@@ -925,8 +1015,12 @@ function renderDetailView() {
   const hist = d.historySummary;
   const verdict = d.verdict || { score: 50, label: "Analiz", tone: "neutral", headline: "", reasons: [] };
 
-  const primaryExternalUrl = d.url.startsWith("https://") ? d.url : picks?.cheapestNet?.url || "";
-  const primaryExternalLabel = d.url.startsWith("https://") ? "Akakçe Sayfası ↗" : "En Ucuz Mağaza ↗";
+  const primaryExternalUrl = d.url.startsWith("https://") ? d.url : picks?.cheapestNet?.url || d.externalUrl || "";
+  const primaryExternalLabel = d.url.startsWith("https://")
+    ? "Akakçe Sayfası ↗"
+    : (d.offers?.length || 0) > 1
+      ? "En Ucuz Mağaza ↗"
+      : "Ürüne Git ↗";
 
   const instPrice = stats?.minNet || d.lowPrice || 0;
   const instCalc = computeInstallment(instPrice, state.installment.months, state.installment.monthlyRate);
@@ -1216,28 +1310,36 @@ function renderDetailView() {
     <!-- Variants (Colors / Capacities / Additional Store Links) -->
     ${
       d.variants?.length
-        ? `
+        ? (() => {
+            const hasInternalVariants = d.variants.some((v) => v.isInternalVirtual || v.isAkakceUrl);
+            return `
       <section class="panel">
         <div class="panel-header">
           <div>
-            <h3>${d.url.startsWith("virtual:") ? "Diğer İlgili Mağaza Sayfaları" : "Diğer Renk / Kapasite Seçenekleri"}</h3>
-            <p class="muted-text">${d.url.startsWith("virtual:") ? "Doğrudan ilgili mağazanın katalog veya ürün sayfasını açın" : "Farklı bir renk veya kapasite daha avantajlı olabilir"}</p>
+            <h3>${hasInternalVariants ? "Diğer Renk / Model Seçenekleri" : "Diğer İlgili Mağaza Sayfaları"}</h3>
+            <p class="muted-text">${hasInternalVariants ? "Farklı bir renk, model veya mağaza seçeneğini kendi görseli ve fiyatıyla inceleyin" : "Doğrudan ilgili mağazanın katalog veya ürün sayfasını açın"}</p>
           </div>
         </div>
         <div class="variants-grid">
           ${d.variants
-            .map(
-              (v) => `
-            <a class="variant-chip" ${v.isAkakceUrl ? `href="#" data-variant-url="${esc(v.url)}"` : `href="${esc(v.url || d.url)}" target="_blank" rel="noopener noreferrer"`}>
-              <span class="variant-name">${esc(v.name)}</span>
-              <span class="variant-price">${v.price ? fmtTL(v.price) : "Mağazada Gör ↗"}</span>
-              ${v.seller ? `<span class="muted-text" style="font-size:0.74rem;margin:0;">${esc(v.seller)}</span>` : ""}
-            </a>`
-            )
+            .map((v) => {
+              const isNavigable = Boolean(v.isAkakceUrl || v.isInternalVirtual);
+              const showThumb = Boolean(v.image && !isFaviconUrl(v.image));
+              return `
+            <a class="variant-chip ${showThumb ? "has-thumb" : ""}" ${isNavigable ? `href="#" data-variant-url="${esc(v.url)}"` : `href="${esc(v.url || d.url)}" target="_blank" rel="noopener noreferrer"`}>
+              ${showThumb ? `<img class="variant-thumb" src="${esc(v.image)}" alt="${esc(v.name)}" loading="lazy" />` : ""}
+              <div class="variant-info">
+                <span class="variant-name">${v.color ? renderColorSwatch(v.color) : ""}${esc(v.name)}</span>
+                <span class="variant-price">${v.price ? fmtTL(v.price) : v.isListingPage ? "Kategoride Gör ↗" : "Mağazada Gör ↗"}</span>
+                ${v.seller ? `<span class="muted-text" style="font-size:0.74rem;margin:0;">${esc(v.seller)}</span>` : ""}
+              </div>
+            </a>`;
+            })
             .join("")}
         </div>
       </section>
-    `
+    `;
+          })()
         : ""
     }
 
@@ -2318,6 +2420,7 @@ function bindEvents() {
       if (key === "reset") {
         state.searchFilters = {
           hideAccessories: false,
+          hideListings: false,
           pricedOnly: false,
           officialOnly: false,
           freeShippingOnly: false,
