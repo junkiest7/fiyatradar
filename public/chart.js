@@ -77,52 +77,78 @@ export function renderPriceChart(container, allPoints, rangeKey = "all") {
 
   const avgY = yAt(avg);
   const gradId = `frGrad_${Math.random().toString(36).slice(2, 8)}`;
+  const isDark = document.documentElement.dataset.theme === "dark";
+  const pal = isDark
+    ? {
+        line: "#60a5fa",
+        ma: "#3b82f6",
+        grid: "#232836",
+        axisText: "#94a0b8",
+        avgLine: "#64748b",
+        avgText: "#94a3b8",
+        dotStroke: "#12151e",
+        good: "#10b981",
+        bad: "#f87171",
+        hoverLine: "#e5e7eb",
+      }
+    : {
+        line: "#1d4ed8",
+        ma: "#93c5fd",
+        grid: "#ece8e0",
+        axisText: "#787f8d",
+        avgLine: "#9ca3af",
+        avgText: "#6b7280",
+        dotStroke: "#ffffff",
+        good: "#0d7a52",
+        bad: "#be3126",
+        hoverLine: "#141517",
+      };
 
   container.innerHTML = `
     <div class="chart-wrap">
       <svg class="chart-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Fiyat geçmişi grafiği">
         <defs>
           <linearGradient id="${gradId}" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="#1d4ed8" stop-opacity="0.16" />
-            <stop offset="100%" stop-color="#1d4ed8" stop-opacity="0.01" />
+            <stop offset="0%" stop-color="${pal.line}" stop-opacity="${isDark ? "0.24" : "0.16"}" />
+            <stop offset="100%" stop-color="${pal.line}" stop-opacity="0.01" />
           </linearGradient>
         </defs>
 
         ${yTicks
           .map(
             (t) => `
-          <line x1="${pad.left}" y1="${t.y.toFixed(1)}" x2="${W - pad.right}" y2="${t.y.toFixed(1)}" stroke="#ece8e0" stroke-width="1" />
-          <text x="${pad.left - 8}" y="${(t.y + 4).toFixed(1)}" text-anchor="end" fill="#787f8d" font-size="10.5" font-family="IBM Plex Mono, monospace">${fmtShortTL(t.val)}</text>
+          <line x1="${pad.left}" y1="${t.y.toFixed(1)}" x2="${W - pad.right}" y2="${t.y.toFixed(1)}" stroke="${pal.grid}" stroke-width="1" />
+          <text x="${pad.left - 8}" y="${(t.y + 4).toFixed(1)}" text-anchor="end" fill="${pal.axisText}" font-size="10.5" font-family="IBM Plex Mono, monospace">${fmtShortTL(t.val)}</text>
         `
           )
           .join("")}
 
         <!-- Period Average Line -->
-        <line x1="${pad.left}" y1="${avgY.toFixed(1)}" x2="${W - pad.right}" y2="${avgY.toFixed(1)}" stroke="#9ca3af" stroke-width="1" stroke-dasharray="4 4" />
-        <text x="${W - pad.right}" y="${(avgY - 5).toFixed(1)}" text-anchor="end" fill="#6b7280" font-size="10" font-family="Plus Jakarta Sans, sans-serif">Ort. ${fmtShortTL(avg)} TL</text>
+        <line x1="${pad.left}" y1="${avgY.toFixed(1)}" x2="${W - pad.right}" y2="${avgY.toFixed(1)}" stroke="${pal.avgLine}" stroke-width="1" stroke-dasharray="4 4" />
+        <text x="${W - pad.right}" y="${(avgY - 5).toFixed(1)}" text-anchor="end" fill="${pal.avgText}" font-size="10" font-family="Plus Jakarta Sans, sans-serif">Ort. ${fmtShortTL(avg)} TL</text>
 
         <!-- Area & Main Line -->
         <path d="${areaPath}" fill="url(#${gradId})" />
-        <path d="${maPath}" fill="none" stroke="#93c5fd" stroke-width="1.5" stroke-dasharray="3 3" />
-        <path d="${linePath}" fill="none" stroke="#1d4ed8" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
+        <path d="${maPath}" fill="none" stroke="${pal.ma}" stroke-width="1.5" stroke-dasharray="3 3" />
+        <path d="${linePath}" fill="none" stroke="${pal.line}" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" />
 
         <!-- Min & Max Callout Dots -->
-        <circle cx="${xAt(minIdx).toFixed(1)}" cy="${yAt(slice[minIdx].price).toFixed(1)}" r="4.5" fill="#0d7a52" stroke="#fff" stroke-width="2" />
-        <circle cx="${xAt(maxIdx).toFixed(1)}" cy="${yAt(slice[maxIdx].price).toFixed(1)}" r="4.5" fill="#be3126" stroke="#fff" stroke-width="2" />
+        <circle cx="${xAt(minIdx).toFixed(1)}" cy="${yAt(slice[minIdx].price).toFixed(1)}" r="4.5" fill="${pal.good}" stroke="${pal.dotStroke}" stroke-width="2" />
+        <circle cx="${xAt(maxIdx).toFixed(1)}" cy="${yAt(slice[maxIdx].price).toFixed(1)}" r="4.5" fill="${pal.bad}" stroke="${pal.dotStroke}" stroke-width="2" />
 
         <!-- X Axis Labels -->
         ${xTicks
           .map(
             (idx) => `
-          <text x="${xAt(idx).toFixed(1)}" y="${H - 8}" text-anchor="${idx === 0 ? "start" : idx === slice.length - 1 ? "end" : "middle"}" fill="#787f8d" font-size="10.5" font-family="IBM Plex Mono, monospace">${slice[idx].dateLabel.slice(0, 5)}</text>
+          <text x="${xAt(idx).toFixed(1)}" y="${H - 8}" text-anchor="${idx === 0 ? "start" : idx === slice.length - 1 ? "end" : "middle"}" fill="${pal.axisText}" font-size="10.5" font-family="IBM Plex Mono, monospace">${slice[idx].dateLabel.slice(0, 5)}</text>
         `
           )
           .join("")}
 
         <!-- Interactive Hover Crosshair -->
         <g class="chart-hover-group" style="display:none;">
-          <line class="hover-line" x1="0" y1="${pad.top}" x2="0" y2="${pad.top + plotH}" stroke="#141517" stroke-width="1" stroke-dasharray="3 3" opacity="0.45" />
-          <circle class="hover-dot" cx="0" cy="0" r="5" fill="#1d4ed8" stroke="#fff" stroke-width="2" />
+          <line class="hover-line" x1="0" y1="${pad.top}" x2="0" y2="${pad.top + plotH}" stroke="${pal.hoverLine}" stroke-width="1" stroke-dasharray="3 3" opacity="0.45" />
+          <circle class="hover-dot" cx="0" cy="0" r="5" fill="${pal.line}" stroke="${pal.dotStroke}" stroke-width="2" />
         </g>
 
         <rect class="chart-overlay" x="${pad.left}" y="${pad.top}" width="${plotW}" height="${plotH}" fill="transparent" style="cursor:crosshair;" />

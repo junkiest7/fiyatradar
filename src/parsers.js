@@ -439,3 +439,110 @@ export function isAccessoryTitle(title, query = "") {
   return false;
 }
 
+const COLOR_RULES = [
+  ["Çöl Titanyum", /\b(col\s+titanyum|desert\s+titanium)\b/i],
+  ["Doğal Titanyum", /\b(dogal\s+titanyum|natural\s+titanium)\b/i],
+  ["Siyah Titanyum", /\b(siyah\s+titanyum|black\s+titanium)\b/i],
+  ["Beyaz Titanyum", /\b(beyaz\s+titanyum|white\s+titanium)\b/i],
+  ["Titanyum", /\b(titanyum|titanium)\b/i],
+  ["Gece Yarısı", /\b(gece\s+yarisi|midnight)\b/i],
+  ["Yıldız Işığı", /\b(yildiz\s+isigi|starlight)\b/i],
+  ["Uzay Grisi", /\b(uzay\s+grisi|space\s+gr[ae]y)\b/i],
+  ["Siyah", /\b(siyah|black|obsidian|graphite|grafit|jet\s+black)\b/i],
+  ["Beyaz", /\b(beyaz|white|pearl|inci)\b/i],
+  ["Lacivert", /\b(lacivert|navy)\b/i],
+  ["Mavi", /\b(mavi|blue|ultramarine|teal|turkuaz|buz\s+mavisi|gok\s+mavisi)\b/i],
+  ["Yeşil", /\b(yesil|green|mint|ada\s+cayi|sage|zumrut)\b/i],
+  ["Kırmızı", /\b(kirmizi|red)\b/i],
+  ["Bordo", /\b(bordo|burgundy|visne)\b/i],
+  ["Pembe", /\b(pembe|pink|rose|gul\s+kurusu|fusya)\b/i],
+  ["Mor", /\b(mor|purple|violet)\b/i],
+  ["Lila", /\b(lila|lavanta|lavender)\b/i],
+  ["Sarı", /\b(sari|yellow)\b/i],
+  ["Turuncu", /\b(turuncu|orange|mercan|coral)\b/i],
+  ["Altın", /\b(altin|gold)\b/i],
+  ["Gümüş", /\b(gumus|silver)\b/i],
+  ["Antrasit", /\b(antrasit|anthracite)\b/i],
+  ["Gri", /\b(gri|gr[ae]y)\b/i],
+  ["Bej", /\b(bej|beige)\b/i],
+  ["Ekru", /\b(ekru|ecru)\b/i],
+  ["Krem", /\b(krem|cream)\b/i],
+  ["Vizon", /\b(vizon|taupe)\b/i],
+  ["Taba", /\b(taba|camel|konyak)\b/i],
+  ["Kahverengi", /\b(kahverengi|kahve|brown|cikolata|havana)\b/i],
+  ["Haki", /\b(haki|khaki|olive)\b/i],
+];
+
+/**
+ * Extracts structured variant attributes (capacity, color, size, volume) from a Turkish product title
+ * for one-tap variant grouping and "which color/capacity is cheapest?" comparison.
+ * @param {string} title
+ * @returns {{ capacity: string|null, color: string|null, size: string|null, volume: string|null }}
+ */
+export function extractVariantAttributes(title) {
+  const raw = String(title || "");
+  if (!raw) return { capacity: null, color: null, size: null, volume: null };
+  const ascii = transliterateTr(raw);
+  const lower = ascii.toLowerCase();
+
+  // 1. Storage Capacity (prefer largest storage >= 32 GB to avoid picking 8 GB RAM on laptops/phones)
+  let capacity = null;
+  const capMatches = [...ascii.matchAll(/(?:^|[\s(/,-])(\d+(?:\.\d+)?)\s*(TB|GB)\b/gi)]
+    .map((m) => {
+      const val = Number.parseFloat(m[1]);
+      const unit = m[2].toUpperCase();
+      const gb = unit === "TB" ? val * 1024 : val;
+      return { gb, label: `${val} ${unit}` };
+    })
+    .filter((x) => Number.isFinite(x.gb) && x.gb >= 16);
+  if (capMatches.length) {
+    capMatches.sort((a, b) => b.gb - a.gb);
+    // Only take >= 32 GB when multiple GB numbers exist, or >= 16 GB if single
+    const chosen = capMatches.find((x) => x.gb >= 32) || capMatches[0];
+    if (chosen) capacity = chosen.label;
+  }
+
+  // 2. Color (match specific multi-word shades like "Çöl Titanyum" before generic "Titanyum"/"Siyah")
+  let color = null;
+  for (const [label, regex] of COLOR_RULES) {
+    if (regex.test(lower)) {
+      color = label;
+      break;
+    }
+  }
+
+  // 3. Size (Shoe EU 35-46 or Clothing XXS-3XL in fashion context)
+  let size = null;
+  const isShoeContext = /\b(ayakkabi|sneaker|bot|topuklu|cizme|sandalet|terlik|loafer|stiletto|babet|krampon|mokasen|espadril)\b/i.test(lower);
+  const isClothingContext = /\b(beden|tisort|t-shirt|gomlek|ceket|mont|elbise|pantolon|sweat|sweatshirt|kazak|bluz|etek|jean|pijama|esofman|hirka|kaban|trenckot|tulum|sort|tayt|yelek|triko|polo)\b/i.test(lower);
+
+  if (isShoeContext) {
+    const shoeNum = lower.match(/\b(3[5-9]|4[0-6])(?:\s*(?:numara|no|eu))?\b/);
+    if (shoeNum) size = `${shoeNum[1]} Numara`;
+  }
+  if (!size && isClothingContext) {
+    const clothSize = ascii.match(/(?:^|[\s(/,-])(XXS|XS|XXL|2XL|3XL|XL|[SML])(?:\s*beden)?(?:$|[\s)/,-])/);
+    if (clothSize) size = `${clothSize[1].toUpperCase()} Beden`;
+  }
+
+  // 4. Package Volume / Weight (e.g., 250 gr, 1 kg, 50 ml, 100 ml, 1 lt, 5 lt)
+  let volume = null;
+  const volMatch = ascii.match(/(?:^|[\s(/,-])(\d+(?:[.,]\d+)?)\s*(kg|gr|g|ml|lt|l)\b/i);
+  if (volMatch) {
+    const num = Number.parseFloat(volMatch[1].replace(",", "."));
+    const u = volMatch[2].toLowerCase();
+    if (Number.isFinite(num) && num > 0) {
+      if (u === "kg" && num <= 50) volume = `${num} kg`;
+      else if ((u === "gr" || u === "g") && num >= 20 && num <= 10000) {
+        volume = num >= 1000 && num % 1000 === 0 ? `${num / 1000} kg` : `${num} gr`;
+      } else if (u === "ml" && num >= 10 && num <= 5000) {
+        volume = num >= 1000 && num % 1000 === 0 ? `${num / 1000} lt` : `${num} ml`;
+      } else if ((u === "lt" || u === "l") && num >= 0.2 && num <= 50) {
+        volume = `${num} lt`;
+      }
+    }
+  }
+
+  return { capacity, color, size, volume };
+}
+

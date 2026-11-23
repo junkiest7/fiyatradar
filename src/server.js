@@ -4,6 +4,8 @@
  */
 
 import express from "express";
+import dns from "node:dns/promises";
+import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -25,7 +27,7 @@ import {
 } from "./db.js";
 import { resolveBarcode, testSerperKey } from "./providers.js";
 import { optimizeCart } from "./optimizer.js";
-import { formatTrNumber } from "./parsers.js";
+import { extractVariantAttributes, formatTrNumber } from "./parsers.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, "..", "public");
@@ -44,6 +46,74 @@ app.get("/manifest.webmanifest", (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, "manifest.webmanifest"));
 });
 app.use(express.static(PUBLIC_DIR));
+
+// SSRF-safe IP check for same-origin product image proxy (used by Canvas PNG Share Cards)
+export function isPrivateOrReservedIp(ip) {
+  if (!ip) return true;
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split(".").map((n) => Number.parseInt(n, 10));
+    if (a === 10 || a === 127 || a === 0) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    if (a >= 224) return true;
+    return false;
+  }
+  if (net.isIPv6(ip)) {
+    const low = ip.toLowerCase();
+    if (low === "::1" || low === "::" || low.startsWith("fc") || low.startsWith("fd") || low.startsWith("fe80:") || low.startsWith("::ffff:127.") || low.startsWith("::ffff:10.") || low.startsWith("::ffff:192.168.") || low.startsWith("::ffff:169.254.")) {
+      return true;
+    }
+    return false;
+  }
+  return true;
+}
+
+app.get("/api/image-proxy", async (req, res) => {
+  try {
+    const raw = String(req.query.url || "").trim();
+    if (!raw) return res.status(400).end();
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "https:") return res.status(400).end();
+    const host = parsed.hostname.toLowerCase();
+    if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal") || net.isIP(host)) {
+      if (isPrivateOrReservedIp(host) || host === "localhost" || host.endsWith(".local") || host.endsWith(".internal")) {
+        return res.status(403).end();
+      }
+    }
+
+    const resolved = await dns.lookup(host, { all: true }).catch(() => []);
+    if (!resolved.length || resolved.some((r) => isPrivateOrReservedIp(r.address))) {
+      return res.status(403).end();
+    }
+
+    const upstream = await fetch(parsed.toString(), {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15",
+        Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!upstream.ok) return res.status(404).end();
+
+    const contentType = String(upstream.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    if (!contentType.startsWith("image/") || contentType.includes("svg")) {
+      return res.status(415).end();
+    }
+
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    if (buf.length > 5 * 1024 * 1024) return res.status(413).end();
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+    res.send(buf);
+  } catch {
+    res.status(404).end();
+  }
+});
 
 // Health check
 app.get("/api/health", (_req, res) => {
@@ -147,10 +217,18 @@ app.get("/api/search", async (req, res) => {
       }
     }
 
+    const enrichedProducts = list.map((p) => ({
+      ...p,
+      variantAttrs:
+        p.badge === "Tüm Mağazalar"
+          ? { capacity: null, color: null, size: null, volume: null }
+          : p.variantAttrs || extractVariantAttributes(p.title),
+    }));
+
     res.json({
       ...result,
-      filteredCount: list.length,
-      products: list,
+      filteredCount: enrichedProducts.length,
+      products: enrichedProducts,
     });
   } catch (err) {
     res.status(502).json({

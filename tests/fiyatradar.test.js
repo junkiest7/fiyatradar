@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   extractUnitInfo,
+  extractVariantAttributes,
   isAccessoryTitle,
   parseDeliverySpeed,
   parseShipping,
@@ -21,6 +22,8 @@ import {
 } from "../src/providers.js";
 import { extractQueryFromStoreUrl, isExternalStoreUrl } from "../src/urlResolver.js";
 import { optimizeCart } from "../src/optimizer.js";
+import { isPrivateOrReservedIp } from "../src/server.js";
+import { cleanOcrProductLines } from "../public/mediaSearch.js";
 
 test("parseTrPrice handles both Turkish and Google/US formatted currency strings accurately", () => {
   assert.equal(parseTrPrice("54.999,00 TL"), 54999);
@@ -295,4 +298,55 @@ test("Live integration: cloud-proof official fallback (MarketFiyati + Migros) re
   assert.ok(det.offers.length >= 1);
   assert.ok(det.stats.minNet > 0);
   assert.ok(getVirtualDetail(first.url) !== null);
+});
+
+test("extractVariantAttributes extracts capacity, color, size, and volume for variant grouping", () => {
+  const phone = extractVariantAttributes("Apple iPhone 16 Pro 256 GB Çöl Titanyum");
+  assert.equal(phone.capacity, "256 GB");
+  assert.equal(phone.color, "Çöl Titanyum");
+
+  const laptop = extractVariantAttributes("MacBook Air M3 16 GB RAM 512 GB SSD Uzay Grisi");
+  assert.equal(laptop.capacity, "512 GB");
+  assert.equal(laptop.color, "Uzay Grisi");
+
+  const shoe = extractVariantAttributes("Stradivarius Siyah Topuklu Ayakkabı 38 Numara");
+  assert.equal(shoe.color, "Siyah");
+  assert.equal(shoe.size, "38 Numara");
+
+  const shirt = extractVariantAttributes("Zara Ekru Keten Gömlek M Beden");
+  assert.equal(shirt.color, "Ekru");
+  assert.equal(shirt.size, "M Beden");
+
+  const coffee = extractVariantAttributes("Lavazza Crema e Aroma 1000 gr Çekirdek Kahve");
+  assert.equal(coffee.volume, "1 kg");
+});
+
+test("cleanOcrProductLines strips phone/shopping UI noise and extracts clean product queries", () => {
+  const rawScreenshot = `
+    14:32
+    5G
+    89%
+    Trendyol
+    Apple iPhone 17 Pro 256 GB Siyah
+    78.499,00 TL
+    Ücretsiz Kargo
+    Sepete Ekle
+    Favorilere Ekle
+    4.8 (124)
+  `;
+  const parsed = cleanOcrProductLines(rawScreenshot);
+  assert.equal(parsed.bestQuery, "Apple iPhone 17 Pro 256 GB Siyah");
+  assert.ok(!parsed.candidates.some((c) => /sepete ekle|ücretsiz kargo|14:32/i.test(c)));
+});
+
+test("isPrivateOrReservedIp blocks loopback, link-local, and RFC1918 addresses while allowing public IPs", () => {
+  assert.equal(isPrivateOrReservedIp("127.0.0.1"), true);
+  assert.equal(isPrivateOrReservedIp("10.0.0.1"), true);
+  assert.equal(isPrivateOrReservedIp("169.254.169.254"), true);
+  assert.equal(isPrivateOrReservedIp("172.16.5.2"), true);
+  assert.equal(isPrivateOrReservedIp("192.168.1.10"), true);
+  assert.equal(isPrivateOrReservedIp("::1"), true);
+  assert.equal(isPrivateOrReservedIp("fe80::1"), true);
+  assert.equal(isPrivateOrReservedIp("8.8.8.8"), false);
+  assert.equal(isPrivateOrReservedIp("104.18.2.1"), false);
 });

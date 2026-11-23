@@ -1,10 +1,10 @@
 /**
- * FiyatRadar Service Worker (v4)
+ * FiyatRadar Service Worker (v6)
  * Network-first for app shell so iPhone PWA always gets instant updates,
  * with cache fallback when offline.
  */
 
-const CACHE_NAME = "fiyatradar-v5";
+const CACHE_NAME = "fiyatradar-v6";
 const SHELL_ASSETS = [
   "/",
   "/index.html",
@@ -12,6 +12,8 @@ const SHELL_ASSETS = [
   "/app.js",
   "/chart.js",
   "/scanner.js",
+  "/mediaSearch.js",
+  "/shareCard.js",
   "/manifest.webmanifest",
   "/icons/apple-touch-icon.png",
   "/icons/icon-192.png",

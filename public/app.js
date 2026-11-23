@@ -7,6 +7,13 @@
 
 import { renderPriceChart } from "./chart.js";
 import { startScanner, stopScanner } from "./scanner.js";
+import {
+  extractProductFromImageFile,
+  isVoiceSearchSupported,
+  startVoiceSearch,
+  stopVoiceSearch,
+} from "./mediaSearch.js";
+import { generatePriceCard, sharePriceCardBlob } from "./shareCard.js";
 
 const state = {
   activeView: "search", // 'search' | 'detail' | 'compare' | 'cart' | 'watchlist' | 'history'
@@ -18,6 +25,14 @@ const state = {
     officialOnly: false,
     freeShippingOnly: false,
     store: "",
+    variantAttr: null, // { group: 'capacity'|'color'|'size'|'volume', value: string }
+  },
+  isListening: false,
+  shareCard: {
+    blob: null,
+    dataUrl: "",
+    filename: "",
+    theme: "light",
   },
   currentDetail: null,
   chartRange: "all",
@@ -47,10 +62,17 @@ const state = {
 const $ = (id) => document.getElementById(id);
 
 const els = {
+  themeToggleBtn: $("themeToggleBtn"),
+  themeIconMoon: $("themeIconMoon"),
+  themeIconSun: $("themeIconSun"),
+  themeColorMeta: $("themeColorMeta"),
   searchHero: $("searchHero"),
   searchForm: $("searchForm"),
   searchInput: $("searchInput"),
   clearSearchBtn: $("clearSearchBtn"),
+  voiceSearchBtn: $("voiceSearchBtn"),
+  photoSearchBtn: $("photoSearchBtn"),
+  photoSearchInput: $("photoSearchInput"),
   openScannerBtn: $("openScannerBtn"),
   suggestList: $("suggestList"),
   statusBanner: $("statusBanner"),
@@ -63,6 +85,7 @@ const els = {
   linkResolvedBanner: $("linkResolvedBanner"),
   fallbackNoticeBanner: $("fallbackNoticeBanner"),
   quickFilterBar: $("quickFilterBar"),
+  variantGroupBar: $("variantGroupBar"),
   resultsHeading: $("resultsHeading"),
   resultsSubmeta: $("resultsSubmeta"),
   resultsGrid: $("resultsGrid"),
@@ -72,6 +95,7 @@ const els = {
   applyPriceFilterBtn: $("applyPriceFilterBtn"),
   detailContainer: $("detailContainer"),
   detailCartToggleBtn: $("detailCartToggleBtn"),
+  detailShareCardBtn: $("detailShareCardBtn"),
   detailShareBtn: $("detailShareBtn"),
   detailCompareToggleBtn: $("detailCompareToggleBtn"),
   detailRefreshBtn: $("detailRefreshBtn"),
@@ -101,6 +125,25 @@ const els = {
   scannerStatus: $("scannerStatus"),
   manualBarcodeForm: $("manualBarcodeForm"),
   manualBarcodeInput: $("manualBarcodeInput"),
+  photoSearchModal: $("photoSearchModal"),
+  closePhotoModalBtn: $("closePhotoModalBtn"),
+  photoPreviewImg: $("photoPreviewImg"),
+  photoProgressWrap: $("photoProgressWrap"),
+  photoProgressBar: $("photoProgressBar"),
+  photoStatusText: $("photoStatusText"),
+  photoCandidatesWrap: $("photoCandidatesWrap"),
+  photoCandidatesList: $("photoCandidatesList"),
+  photoSearchConfirmForm: $("photoSearchConfirmForm"),
+  photoQueryInput: $("photoQueryInput"),
+  pickAnotherPhotoBtn: $("pickAnotherPhotoBtn"),
+  photoConfirmSearchBtn: $("photoConfirmSearchBtn"),
+  shareCardModal: $("shareCardModal"),
+  closeShareCardBtn: $("closeShareCardBtn"),
+  shareCardThemePills: $("shareCardThemePills"),
+  shareCardLoading: $("shareCardLoading"),
+  shareCardImg: $("shareCardImg"),
+  downloadShareCardBtn: $("downloadShareCardBtn"),
+  nativeShareCardBtn: $("nativeShareCardBtn"),
   compareBasketBar: $("compareBasketBar"),
   compareResultContainer: $("compareResultContainer"),
   runCompareBtn: $("runCompareBtn"),
@@ -554,6 +597,7 @@ async function performSearch(query, opts = {}) {
       officialOnly: false,
       freeShippingOnly: false,
       store: "",
+      variantAttr: null,
     };
 
     switchView("search");
@@ -575,8 +619,80 @@ function getFilteredSearchProducts() {
       const storeLabel = (p.badge || p.source || "").toLocaleLowerCase("tr-TR");
       if (storeLabel !== f.store.toLocaleLowerCase("tr-TR")) return false;
     }
+    if (f.variantAttr) {
+      const { group, value } = f.variantAttr;
+      if (p.variantAttrs?.[group] !== value) return false;
+    }
     return true;
   });
+}
+
+function renderVariantGroupBar() {
+  if (!els.variantGroupBar) return;
+  const all = state.searchData?.products || [];
+  const f = state.searchFilters;
+  const pool = all.filter((p) => (!f.hideAccessories || !p.isAccessory) && p.badge !== "Tüm Mağazalar");
+  if (pool.length < 2) {
+    els.variantGroupBar.hidden = true;
+    els.variantGroupBar.innerHTML = "";
+    return;
+  }
+
+  const groupDefs = [
+    { key: "capacity", label: "Kapasite" },
+    { key: "color", label: "Renk" },
+    { key: "size", label: "Beden / No" },
+    { key: "volume", label: "Gramaj" },
+  ];
+
+  const rowsHtml = [];
+  for (const def of groupDefs) {
+    const map = new Map(); // value -> { count, minPrice }
+    for (const p of pool) {
+      const val = p.variantAttrs?.[def.key];
+      if (!val) continue;
+      const entry = map.get(val) || { count: 0, minPrice: Infinity };
+      entry.count += 1;
+      if (typeof p.lowestPrice === "number" && p.lowestPrice > 0 && p.lowestPrice < entry.minPrice) {
+        entry.minPrice = p.lowestPrice;
+      }
+      map.set(val, entry);
+    }
+
+    // Only show a variant dimension when at least 2 distinct options exist (e.g. 128 GB vs 256 GB, or Siyah vs Beyaz)
+    if (map.size < 2) continue;
+
+    const entries = [...map.entries()].sort((a, b) => a[1].minPrice - b[1].minPrice || b[1].count - a[1].count);
+    const globalMin = entries.reduce((m, [, info]) => Math.min(m, info.minPrice), Infinity);
+
+    const chips = entries
+      .slice(0, 10)
+      .map(([val, info]) => {
+        const isActive = f.variantAttr?.group === def.key && f.variantAttr?.value === val;
+        const isKelepir = Number.isFinite(info.minPrice) && info.minPrice === globalMin && Number.isFinite(globalMin);
+        const priceTag = Number.isFinite(info.minPrice)
+          ? `<span class="vg-price">${new Intl.NumberFormat("tr-TR", { maximumFractionDigits: 0 }).format(info.minPrice)} TL${isKelepir ? " ★" : ""}</span>`
+          : `<span class="vg-price">(${info.count})</span>`;
+        return `<button type="button" class="variant-group-chip ${isKelepir ? "kelepir" : ""} ${isActive ? "active" : ""}" data-vgroup="${esc(def.key)}" data-vval="${esc(val)}">${esc(val)} ${priceTag}</button>`;
+      })
+      .join("");
+
+    rowsHtml.push(`
+      <div class="variant-group-row">
+        <span class="variant-group-label">${esc(def.label)}</span>
+        ${chips}
+      </div>
+    `);
+  }
+
+  if (!rowsHtml.length) {
+    els.variantGroupBar.hidden = true;
+    els.variantGroupBar.innerHTML = "";
+    return;
+  }
+
+  els.variantGroupBar.hidden = false;
+  els.variantGroupBar.innerHTML = rowsHtml.join("");
 }
 
 function renderQuickFilterBar() {
@@ -605,7 +721,7 @@ function renderQuickFilterBar() {
     .slice(0, 6);
 
   const chips = [];
-  const anyActive = f.pricedOnly || f.officialOnly || f.freeShippingOnly || Boolean(f.store);
+  const anyActive = f.pricedOnly || f.officialOnly || f.freeShippingOnly || Boolean(f.store) || Boolean(f.variantAttr);
   chips.push(
     `<button type="button" class="filter-chip ${!anyActive && !f.hideAccessories ? "active" : ""}" data-qfilter="reset">Tümü (${all.length})</button>`
   );
@@ -675,6 +791,7 @@ function renderSearchResults() {
   }
 
   renderQuickFilterBar();
+  renderVariantGroupBar();
 
   const visibleProducts = getFilteredSearchProducts();
   els.resultsHeading.textContent = `"${data.query}" sonuçları`;
@@ -2205,6 +2322,7 @@ function bindEvents() {
           officialOnly: false,
           freeShippingOnly: false,
           store: "",
+          variantAttr: null,
         };
       } else if (key in state.searchFilters) {
         state.searchFilters[key] = !state.searchFilters[key];
@@ -2219,6 +2337,81 @@ function bindEvents() {
       state.searchFilters.store = state.searchFilters.store === chosen ? "" : chosen;
       renderSearchResults();
     }
+  });
+
+  // Smart Capacity / Color / Size / Volume Variant Group Bar clicks
+  els.variantGroupBar?.addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-vgroup][data-vval]");
+    if (!chip) return;
+    const group = chip.dataset.vgroup;
+    const value = chip.dataset.vval;
+    const cur = state.searchFilters.variantAttr;
+    if (cur && cur.group === group && cur.value === value) {
+      state.searchFilters.variantAttr = null;
+    } else {
+      state.searchFilters.variantAttr = { group, value };
+    }
+    renderSearchResults();
+  });
+
+  // OLED Dark Mode toggle
+  els.themeToggleBtn?.addEventListener("click", toggleTheme);
+
+  // Turkish Voice Search (Web Speech API)
+  els.voiceSearchBtn?.addEventListener("click", handleVoiceToggle);
+
+  // Screenshot / Photo Product Search (Client-Side OCR)
+  els.photoSearchBtn?.addEventListener("click", () => {
+    if (els.photoSearchInput) {
+      els.photoSearchInput.value = "";
+      els.photoSearchInput.click();
+    }
+  });
+
+  els.photoSearchInput?.addEventListener("change", () => {
+    const file = els.photoSearchInput.files?.[0];
+    if (file) openPhotoSearchWithFile(file);
+  });
+
+  // Also support pasting a screenshot directly into the search box (Desktop / iPad)
+  els.searchInput?.addEventListener("paste", (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type && item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (file) {
+          e.preventDefault();
+          openPhotoSearchWithFile(file);
+          return;
+        }
+      }
+    }
+  });
+
+  els.closePhotoModalBtn?.addEventListener("click", closePhotoModal);
+  els.photoSearchModal?.addEventListener("click", (e) => {
+    if (e.target === els.photoSearchModal) closePhotoModal();
+  });
+  els.pickAnotherPhotoBtn?.addEventListener("click", () => {
+    if (els.photoSearchInput) {
+      els.photoSearchInput.value = "";
+      els.photoSearchInput.click();
+    }
+  });
+  els.photoCandidatesList?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-ocr-candidate]");
+    if (btn && els.photoQueryInput) {
+      els.photoQueryInput.value = btn.dataset.ocrCandidate;
+      els.photoQueryInput.focus();
+    }
+  });
+  els.photoSearchConfirmForm?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const q = (els.photoQueryInput?.value || "").trim();
+    if (!q) return;
+    closePhotoModal();
+    performSearch(q);
   });
 
   // Results grid click delegation
@@ -2248,6 +2441,33 @@ function bindEvents() {
 
   els.detailCartToggleBtn?.addEventListener("click", () => {
     if (state.currentDetail) toggleCartItem(state.currentDetail);
+  });
+
+  // WhatsApp / iMessage Visual PNG Price Card modal
+  els.detailShareCardBtn?.addEventListener("click", () => {
+    if (state.currentDetail) openShareCardModal();
+  });
+  els.closeShareCardBtn?.addEventListener("click", closeShareCardModal);
+  els.shareCardModal?.addEventListener("click", (e) => {
+    if (e.target === els.shareCardModal) closeShareCardModal();
+  });
+  els.shareCardThemePills?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-card-theme]");
+    if (!btn) return;
+    const theme = btn.dataset.cardTheme === "dark" ? "dark" : "light";
+    renderShareCardPreview(theme);
+  });
+  els.downloadShareCardBtn?.addEventListener("click", downloadCurrentShareCard);
+  els.nativeShareCardBtn?.addEventListener("click", async () => {
+    const sc = state.shareCard;
+    if (!sc.blob || !state.currentDetail) return;
+    const outcome = await sharePriceCardBlob(sc.blob, sc.filename, state.currentDetail);
+    if (outcome === "shared") {
+      showToast("Görsel fiyat kartı paylaşıldı!");
+    } else if (outcome === "unsupported") {
+      downloadCurrentShareCard();
+      showToast("Görsel kart PNG olarak indirildi; WhatsApp'tan kolayca gönderebilirsiniz.");
+    }
   });
 
   els.detailShareBtn?.addEventListener("click", async () => {
@@ -2537,6 +2757,8 @@ function bindEvents() {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       if (els.scannerModal && !els.scannerModal.hidden) closeScannerModal();
+      if (els.photoSearchModal && !els.photoSearchModal.hidden) closePhotoModal();
+      if (els.shareCardModal && !els.shareCardModal.hidden) closeShareCardModal();
       if (els.settingsModal && !els.settingsModal.hidden) closeSettingsModal();
     }
   });
@@ -2601,6 +2823,210 @@ function bindEvents() {
   });
 }
 
+// ============================================================================
+// OLED DARK MODE, VOICE SEARCH, PHOTO OCR & PNG SHARE CARD CONTROLLERS
+// ============================================================================
+function applyTheme(mode, persist = false) {
+  const isDark = mode === "dark";
+  document.documentElement.dataset.theme = isDark ? "dark" : "light";
+  if (els.themeColorMeta) {
+    els.themeColorMeta.setAttribute("content", isDark ? "#0b0d12" : "#f7f6f2");
+  }
+  if (els.themeIconMoon) els.themeIconMoon.hidden = isDark;
+  if (els.themeIconSun) els.themeIconSun.hidden = !isDark;
+  if (persist) {
+    try {
+      localStorage.setItem("fiyatradar_theme", isDark ? "dark" : "light");
+    } catch {
+      // Ignore
+    }
+  }
+  // Re-render SVG chart so gridlines & axis labels adapt immediately
+  if (state.activeView === "detail" && state.currentDetail && $("priceChartMount")) {
+    renderPriceChart($("priceChartMount"), state.currentDetail.history, state.chartRange);
+  }
+}
+
+function toggleTheme() {
+  const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  const next = current === "dark" ? "light" : "dark";
+  applyTheme(next, true);
+  showToast(next === "dark" ? "Karanlık Mod (OLED) açıldı." : "Aydınlık Mod açıldı.");
+}
+
+function initTheme() {
+  const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  applyTheme(current, false);
+  // Follow iOS system theme live if user has not manually locked a theme
+  if (window.matchMedia) {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    mq.addEventListener?.("change", (e) => {
+      try {
+        if (!localStorage.getItem("fiyatradar_theme")) {
+          applyTheme(e.matches ? "dark" : "light", false);
+        }
+      } catch {
+        // Ignore
+      }
+    });
+  }
+}
+
+function handleVoiceToggle() {
+  if (state.isListening) {
+    stopVoiceSearch();
+    state.isListening = false;
+    els.voiceSearchBtn?.classList.remove("listening");
+    setStatus(null);
+    return;
+  }
+
+  if (!isVoiceSearchSupported()) {
+    showToast("Sesli arama bu tarayıcıda desteklenmiyor. iPhone Safari veya Chrome kullanabilirsiniz.");
+    return;
+  }
+
+  startVoiceSearch({
+    onStart: () => {
+      state.isListening = true;
+      els.voiceSearchBtn?.classList.add("listening");
+      setStatus("loading", "Dinleniyor... Aramak istediğiniz ürün adını söyleyin (örn. 'iPhone 17 256 GB')");
+    },
+    onInterim: (text) => {
+      els.searchInput.value = text;
+      els.clearSearchBtn.hidden = !text;
+    },
+    onResult: (finalText) => {
+      state.isListening = false;
+      els.voiceSearchBtn?.classList.remove("listening");
+      setStatus(null);
+      if (finalText) {
+        els.searchInput.value = finalText;
+        els.clearSearchBtn.hidden = false;
+        performSearch(finalText);
+      }
+    },
+    onError: (msg) => {
+      state.isListening = false;
+      els.voiceSearchBtn?.classList.remove("listening");
+      setStatus(null);
+      showToast(msg);
+    },
+    onEnd: () => {
+      state.isListening = false;
+      els.voiceSearchBtn?.classList.remove("listening");
+    },
+  });
+}
+
+async function openPhotoSearchWithFile(file) {
+  if (!els.photoSearchModal) return;
+  els.photoSearchModal.hidden = false;
+  els.photoPreviewImg.hidden = true;
+  els.photoProgressWrap.hidden = false;
+  els.photoProgressBar.style.width = "8%";
+  els.photoStatusText.textContent = "Görsel yükleniyor...";
+  els.photoCandidatesWrap.hidden = true;
+  els.photoCandidatesList.innerHTML = "";
+  els.photoQueryInput.value = "";
+  if (els.photoConfirmSearchBtn) els.photoConfirmSearchBtn.disabled = true;
+
+  try {
+    const res = await extractProductFromImageFile(file, (msg, pct) => {
+      els.photoStatusText.textContent = msg;
+      els.photoProgressBar.style.width = `${Math.max(8, Math.min(100, pct || 0))}%`;
+    });
+
+    if (res.previewDataUrl) {
+      els.photoPreviewImg.src = res.previewDataUrl;
+      els.photoPreviewImg.hidden = false;
+    }
+
+    els.photoProgressBar.style.width = "100%";
+    els.photoStatusText.textContent = res.bestQuery
+      ? "✓ Ürün metni okundu. Gerekirse düzenleyip 'Tüm Türkiye'de Ara'ya dokunun."
+      : "Görselden net ürün adı seçilemedi; ürün adını aşağıya yazıp arayabilirsiniz.";
+
+    if (res.candidates?.length) {
+      els.photoCandidatesWrap.hidden = false;
+      els.photoCandidatesList.innerHTML = res.candidates
+        .map(
+          (c) =>
+            `<button type="button" class="photo-candidate-chip" data-ocr-candidate="${esc(c)}" title="${esc(c)}">${esc(c)}</button>`
+        )
+        .join("");
+    }
+
+    els.photoQueryInput.value = res.bestQuery || "";
+    if (els.photoConfirmSearchBtn) els.photoConfirmSearchBtn.disabled = false;
+    if (res.bestQuery) els.photoQueryInput.focus();
+  } catch (err) {
+    els.photoProgressWrap.hidden = false;
+    els.photoProgressBar.style.width = "0%";
+    els.photoStatusText.textContent = `✗ ${err.message || "Görsel okunamadı."}`;
+    if (els.photoConfirmSearchBtn) els.photoConfirmSearchBtn.disabled = false;
+  }
+}
+
+function closePhotoModal() {
+  if (els.photoSearchModal) els.photoSearchModal.hidden = true;
+}
+
+function openShareCardModal() {
+  if (!els.shareCardModal || !state.currentDetail) return;
+  els.shareCardModal.hidden = false;
+  const defaultTheme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
+  renderShareCardPreview(defaultTheme);
+}
+
+async function renderShareCardPreview(theme) {
+  if (!state.currentDetail) return;
+  state.shareCard = { blob: null, dataUrl: "", filename: "", theme };
+
+  els.shareCardThemePills?.querySelectorAll("[data-card-theme]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.cardTheme === theme);
+  });
+
+  if (els.shareCardLoading) {
+    els.shareCardLoading.hidden = false;
+    els.shareCardLoading.textContent = "Yüksek çözünürlüklü fiyat kartı oluşturuluyor...";
+  }
+  if (els.shareCardImg) els.shareCardImg.hidden = true;
+  if (els.downloadShareCardBtn) els.downloadShareCardBtn.disabled = true;
+  if (els.nativeShareCardBtn) els.nativeShareCardBtn.disabled = true;
+
+  try {
+    const result = await generatePriceCard(state.currentDetail, { theme });
+    state.shareCard = { ...result, theme };
+    if (els.shareCardImg) {
+      els.shareCardImg.src = result.dataUrl;
+      els.shareCardImg.hidden = false;
+    }
+    if (els.shareCardLoading) els.shareCardLoading.hidden = true;
+    if (els.downloadShareCardBtn) els.downloadShareCardBtn.disabled = false;
+    if (els.nativeShareCardBtn) els.nativeShareCardBtn.disabled = false;
+  } catch (err) {
+    if (els.shareCardLoading) {
+      els.shareCardLoading.hidden = false;
+      els.shareCardLoading.textContent = `Kart oluşturulamadı: ${err.message}`;
+    }
+  }
+}
+
+function downloadCurrentShareCard() {
+  const sc = state.shareCard;
+  if (!sc.dataUrl) return;
+  const a = document.createElement("a");
+  a.href = sc.dataUrl;
+  a.download = sc.filename || "fiyatradar-kart.png";
+  a.click();
+  showToast("Görsel fiyat kartı (PNG) indirildi.");
+}
+
+function closeShareCardModal() {
+  if (els.shareCardModal) els.shareCardModal.hidden = true;
+}
+
 function openSettingsModal() {
   if (!els.settingsModal) return;
   const { serperKey, serpApiKey } = getStoredApiKeys();
@@ -2637,6 +3063,7 @@ function initPwa() {
 }
 
 // Boot
+initTheme();
 bindEvents();
 initPwa();
 updateCompareBadges();

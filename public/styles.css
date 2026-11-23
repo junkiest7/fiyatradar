@@ -2669,6 +2669,359 @@ body {
   border-color: var(--good-border);
 }
 
+/* ==========================================================================
+   v6 Features: OLED Dark Mode, Voice/Photo Search, Variant Groups, PNG Card
+   ========================================================================== */
+
+.topbar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.search-input.has-tools {
+  padding-right: 148px;
+}
+
+.clear-btn.has-tools {
+  right: 118px;
+}
+
+.search-tools {
+  position: absolute;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.search-tool-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-page);
+  color: var(--ink-secondary);
+  width: 33px;
+  height: 33px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.search-tool-btn:hover {
+  background: var(--primary-soft);
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+.search-tool-btn.listening {
+  background: var(--bad);
+  color: #fff;
+  border-color: var(--bad);
+  animation: micPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes micPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(190, 49, 38, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 7px rgba(190, 49, 38, 0);
+  }
+}
+
+/* Smart Capacity / Color / Size / Volume Variant Grouping Bar */
+.variant-group-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  box-shadow: var(--shadow-sm);
+}
+
+.variant-group-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.variant-group-row::-webkit-scrollbar {
+  display: none;
+}
+
+.variant-group-label {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--ink-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  min-width: 66px;
+}
+
+.variant-group-chip {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-page);
+  color: var(--ink);
+  font-size: 0.79rem;
+  font-weight: 600;
+  padding: 5px 11px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.variant-group-chip:hover {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.variant-group-chip .vg-price {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--ink-secondary);
+}
+
+.variant-group-chip.kelepir {
+  border-color: var(--good-border);
+  background: var(--good-soft);
+}
+
+.variant-group-chip.kelepir .vg-price {
+  color: var(--good);
+  font-weight: 700;
+}
+
+.variant-group-chip.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.variant-group-chip.active .vg-price {
+  color: rgba(255, 255, 255, 0.92);
+}
+
+/* Screenshot / Photo OCR Search Modal */
+.photo-sheet,
+.share-card-sheet {
+  width: min(490px, 100%);
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.photo-preview-box {
+  width: 100%;
+  max-height: 210px;
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.photo-preview-box img {
+  width: 100%;
+  max-height: 210px;
+  object-fit: contain;
+  display: block;
+}
+
+.ocr-progress-wrap {
+  margin-top: 12px;
+}
+
+.ocr-progress-track {
+  width: 100%;
+  height: 7px;
+  background: var(--bg-subtle);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.ocr-progress-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 999px;
+  transition: width 0.2s ease;
+}
+
+.photo-candidates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.photo-candidate-chip {
+  border: 1px solid var(--border-strong);
+  background: var(--bg-page);
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.photo-candidate-chip:hover {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+/* PNG Visual Price Card Modal */
+.share-card-theme-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.share-card-preview {
+  width: 100%;
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 240px;
+}
+
+.share-card-preview img {
+  width: 100%;
+  max-height: 56vh;
+  object-fit: contain;
+  display: block;
+}
+
+/* ==========================================================================
+   iPhone OLED Dark Mode (html[data-theme="dark"])
+   ========================================================================== */
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-page: #0b0d12;
+  --bg-surface: #131722;
+  --bg-subtle: #1b2130;
+  --bg-hover: #1f2638;
+
+  --border: #242b3b;
+  --border-strong: #343e54;
+
+  --ink: #f3f5f8;
+  --ink-secondary: #b6bfcf;
+  --ink-muted: #8490a6;
+
+  --primary: #3b82f6;
+  --primary-hover: #60a5fa;
+  --primary-soft: rgba(59, 130, 246, 0.16);
+
+  --good: #10b981;
+  --good-soft: rgba(16, 185, 129, 0.14);
+  --good-border: rgba(16, 185, 129, 0.36);
+
+  --warn: #f59e0b;
+  --warn-soft: rgba(245, 158, 11, 0.14);
+  --warn-border: rgba(245, 158, 11, 0.36);
+
+  --bad: #f87171;
+  --bad-soft: rgba(248, 113, 113, 0.14);
+  --bad-border: rgba(248, 113, 113, 0.36);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 14px 36px rgba(0, 0, 0, 0.6);
+}
+
+html[data-theme="dark"] .topbar {
+  background: rgba(11, 13, 18, 0.88);
+}
+
+html[data-theme="dark"] .mobile-tab-bar {
+  background: rgba(11, 13, 18, 0.94);
+  border-top-color: var(--border);
+}
+
+html[data-theme="dark"] .brand-mark {
+  background: var(--primary);
+  color: #fff;
+}
+
+html[data-theme="dark"] .nav-tab.active,
+html[data-theme="dark"] .filter-chip.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+html[data-theme="dark"] .pick-card.primary-pick {
+  background: linear-gradient(180deg, rgba(16, 185, 129, 0.16) 0%, var(--bg-surface) 50%);
+}
+
+html[data-theme="dark"] .offers-table tbody tr.cheapest-row {
+  background: rgba(16, 185, 129, 0.11);
+}
+
+html[data-theme="dark"] .watch-card.target-hit {
+  background: rgba(16, 185, 129, 0.11);
+  border-color: var(--good-border);
+}
+
+html[data-theme="dark"] .product-card-media,
+html[data-theme="dark"] .overview-image-box,
+html[data-theme="dark"] .watch-thumb {
+  background: #f8fafc;
+}
+
+html[data-theme="dark"] .chart-tooltip,
+html[data-theme="dark"] .floating-compare-inner,
+html[data-theme="dark"] .toast,
+html[data-theme="dark"] .ios-install-inner {
+  background: #1f2638;
+  color: #f3f5f8;
+  border: 1px solid var(--border-strong);
+}
+
+html[data-theme="dark"] .range-pill.active {
+  background: var(--bg-subtle);
+  color: var(--ink);
+}
+
+@media (max-width: 480px) {
+  .search-input.has-tools {
+    padding-right: 132px;
+  }
+  .clear-btn.has-tools {
+    right: 108px;
+  }
+  .search-tool-btn {
+    width: 30px;
+    height: 30px;
+  }
+}
+
 /* Print Report Mode */
 @media print {
   .topbar,
