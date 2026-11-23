@@ -1,15 +1,16 @@
 # FiyatRadar — Türkiye Detaylı Fiyat Araştırma Botu (iOS PWA + Web)
 
-Türkiye e-ticaret piyasasındaki (Trendyol, Hepsiburada, Amazon Türkiye, n11, Pazarama, idefix, PttAVM, Migros, MediaMarkt, Teknosa, Vatan vb.) ürün fiyatlarını canlı olarak toplayan, **kargo dahil net maliyet** ve **birim fiyat** hesaplayan, **kargo tuzaklarını** tespit eden ve **6 aylık gerçek fiyat geçmişine göre "Şimdi Alınır mı?" analizi** sunan iPhone (iOS PWA) ve web uygulamasıdır.
+Türkiye e-ticaret piyasasındaki (Trendyol, Hepsiburada, Amazon Türkiye, n11, Stradivarius, Zara, Boyner, Pazarama, idefix, PttAVM, Migros, MediaMarkt, Teknosa, Vatan vb.) ürün fiyatlarını canlı olarak toplayan, **kargo dahil net maliyet**, **birim fiyat**, **taksit hesabı**, **barkod tarama**, **mağaza linki çözümleme** ve **sepet maliyet optimizasyonu** sunan iPhone (iOS PWA) ve web uygulamasıdır.
 
 ## Öne Çıkan Özellikler
 
-- **iPhone İçin Yerel Uygulama Deneyimi (iOS PWA):** Alt sekme çubuğu (Araştır / Kıyasla / Takip / Geçmiş), Dynamic Island & güvenli alan (`safe-area-inset`) uyumu, iPhone'a özel teklif kartları, parmakla kaydırılabilir 6 aylık fiyat grafiği, yerel iOS Paylaş menüsü ve özel ana ekran ikonu.
-- **Canlı Çoklu Mağaza Karşılaştırması:** Tek aramada 50+ mağazanın anlık fiyat, kargo, satıcı puanı (`8,6/10`), stok ve teslimat süresini çeker; doğrudan mağaza bağlantılarını eşleştirir.
-- **Kargo Dahil Net Maliyet & Kargo Tuzağı Tespiti:** Etiket fiyatı daha ucuz görünüp kargo eklendiğinde daha pahalıya gelen teklifleri otomatik yakalar ve net maliyete göre yeniden sıralar.
-- **Otomatik Birim Fiyat Hesaplayıcı:** Gramaj, litre, çoklu paket ve adet bilgilerini (`1000 gr`, `6x200 ml`, `120'li`, `128 GB`) otomatik ayrıştırır (`TL/kg`, `TL/lt`, `TL/adet`, `TL/GB`).
-- **0–100 Fırsat Skoru & "Şimdi Alınır mı?" Karar Motoru:** 6 aylık günlük gerçek fiyat geçmişi üzerinden 30 günlük ortalama, en düşük/en yüksek tarihler ve oynaklık analiziyle alım zamanlaması puanı üretir.
-- **Yan Yana Karşılaştırma & Takip Listesi:** En fazla 4 ürünü yan yana kıyaslama, hedef fiyatlı takip listesi (iPhone yerel yedeklemeli), Türkçe Excel uyumlu CSV & JSON dışa aktarma.
+- **iPhone İçin Yerel Uygulama Deneyimi (iOS PWA):** 5 sekmeli alt bar (Araştır / Kıyasla / Sepet / Takip / Geçmiş), Dynamic Island & güvenli alan (`safe-area-inset`) uyumu, parmakla kaydırılabilir fiyat grafiği, yerel iOS Paylaş menüsü ve özel ana ekran ikonu.
+- **Link Yapıştır → Tüm Türkiye'de En Ucuzunu Bul:** Trendyol (`ty.gl`), Hepsiburada, Amazon TR (`amzn.eu`), Stradivarius, Zara, Mango, Boyner, n11, MediaMarkt, Teknosa, Vatan veya Cimri ürün linkini yapıştırdığınızda ürünü otomatik çözer ve rakip mağazalardaki daha ucuz teklifleri listeler.
+- **iPhone Kamera Barkod Tarayıcı (EAN-13 / UPC):** Mağazada veya süpermarkette ürün barkodunu kamerayla okutup (iOS Safari `@zxing/browser` destekli) internet fiyatlarıyla anında kıyaslar.
+- **Akıllı Arama Motoru v2 + Aksesuar & Şüpheli Ucuz Filtresi:** Türkçe karakter uyumlu yedek sorgular, gerçek ürün görseli zenginleştirme, `kılıf / kordon / pişirme kağıdı` otomatik aksesuar ayrıştırması ve medyanın çok altındaki şüpheli ucuz / muadil ilan tespiti.
+- **Hızlı Filtre Çipleri & Kredi Kartı Taksit Hesaplayıcı:** Arama sonuçlarında tek dokunuşla mağaza, ücretsiz kargo ve aksesuar filtreleme; ürün detayında `Peşin / 3 / 6 / 9 / 12 Taksit` ve vade farkı hesabı.
+- **Sepet Maliyet Optimizatörü:** Alacağınız birden fazla ürünü ekleyerek kargo barajlarına göre **Karışık Mağaza** mı yoksa **Tek Mağaza** mı daha ucuz otomatik hesaplar.
+- **Kargo Dahil Net Maliyet, Kargo Tuzağı Tespiti & Kişisel Fiyat Geçmişi:** Etiket/kargo tuzaklarını yakalar, takip listesindeki ürünlerde her kontrolde kişisel fiyat geçmişi grafiğinizi otomatik biriktirir (iPhone yerel yedeklemeli), Türkçe Excel uyumlu CSV & JSON dışa aktarır.
 
 ## iPhone'da Kullanım (Render + Ana Ekrana Ekle)
 

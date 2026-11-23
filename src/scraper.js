@@ -8,6 +8,7 @@
 import * as cheerio from "cheerio";
 import {
   extractUnitInfo,
+  isAccessoryTitle,
   parseDeliverySpeed,
   parseShipping,
   parseStoreInfo,
@@ -21,6 +22,8 @@ import {
   searchSerpApiTurkey,
   searchSerperTurkey,
 } from "./providers.js";
+import { isExternalStoreUrl, resolveStoreProductUrl } from "./urlResolver.js";
+import { getPriceSnapshots, getWatchlistItemByUrl } from "./db.js";
 
 const BASE_URL = "https://www.akakce.com";
 const DEFAULT_HEADERS = {
@@ -133,7 +136,7 @@ export async function getSuggestions(query) {
  * 3. Zero-key Official Fallback (T.C. Market Fiyatı + Migros Elektronik + Migros Sanal Market)
  */
 export async function searchProducts(query, options = {}) {
-  const q = (query || "").trim();
+  let q = (query || "").trim();
   if (!q) {
     throw new Error("Arama terimi boş olamaz.");
   }
@@ -141,10 +144,23 @@ export async function searchProducts(query, options = {}) {
   const serperKey = (options.serperKey || process.env.SERPER_API_KEY || "").trim();
   const serpApiKey = (options.serpApiKey || process.env.SERPAPI_KEY || "").trim();
 
+  // Universal Turkish Store Link Resolver (Trendyol, ty.gl, Hepsiburada, Amazon TR, Stradivarius, Zara, n11, etc.)
+  let resolvedFromLink = null;
+  if (isExternalStoreUrl(q)) {
+    const resolved = await resolveStoreProductUrl(q);
+    if (!resolved.resolvedQuery) {
+      throw new Error(
+        `${resolved.sourceStore} bağlantısından ürün adı çözümlenemedi. Lütfen ürün adını doğrudan yazarak arayın.`
+      );
+    }
+    resolvedFromLink = resolved;
+    q = resolved.resolvedQuery;
+  }
+
   // If user pasted a direct Akakce URL, return a direct redirect hint
   const maybeUrl = normalizeProductUrl(q);
   if (maybeUrl && maybeUrl.includes("fiyati,")) {
-    const detail = await getProductDetail(maybeUrl, { refresh: options.refresh });
+    const detail = await getProductDetail(maybeUrl, { refresh: options.refresh, serperKey, serpApiKey });
     return {
       query: q,
       provider: detail.provider || "Akakçe",
@@ -161,6 +177,7 @@ export async function searchProducts(query, options = {}) {
           lowestPrice: detail.stats?.minNet ?? detail.lowPrice,
           offerCount: detail.totalOfferCount,
           badge: detail.verdict?.label || "",
+          isAccessory: false,
           unitInfo: detail.unitInfo,
         },
       ],
@@ -173,11 +190,11 @@ export async function searchProducts(query, options = {}) {
     const cKey = `serper-tr:${q.toLocaleLowerCase("tr-TR")}`;
     if (!options.refresh) {
       const cached = getCached(cKey);
-      if (cached) return { ...cached, cached: true };
+      if (cached) return { ...cached, cached: true, resolvedFromLink };
     }
     const result = await searchSerperTurkey(q, serperKey);
     setCached(cKey, result, SEARCH_TTL_MS);
-    return result;
+    return { ...result, resolvedFromLink };
   }
 
   // Priority 2: Google Türkiye Search via SerpAPI
@@ -185,11 +202,11 @@ export async function searchProducts(query, options = {}) {
     const cKey = `serpapi-tr:${q.toLocaleLowerCase("tr-TR")}`;
     if (!options.refresh) {
       const cached = getCached(cKey);
-      if (cached) return { ...cached, cached: true };
+      if (cached) return { ...cached, cached: true, resolvedFromLink };
     }
     const result = await searchSerpApiTurkey(q, serpApiKey);
     setCached(cKey, result, SEARCH_TTL_MS);
-    return result;
+    return { ...result, resolvedFromLink };
   }
 
   const page = Math.max(1, Number.parseInt(options.page, 10) || 1);
@@ -198,7 +215,7 @@ export async function searchProducts(query, options = {}) {
   if (!options.refresh) {
     const cached = getCached(cacheKey);
     if (cached) {
-      return { ...cached, cached: true };
+      return { ...cached, cached: true, resolvedFromLink };
     }
   }
 
@@ -213,7 +230,7 @@ export async function searchProducts(query, options = {}) {
     fallback.fallbackNotice =
       "Bulut sunucu IP'si nedeniyle Akakçe doğrudan erişimi kısıtlandı; şu an Migros Elektronik ve T.C. Market Fiyatı resmi kaynakları taranıyor. Trendyol, Hepsiburada, Amazon TR, n11, MediaMarkt dahil 50+ mağazanın tamamı için Ayarlar'dan ücretsiz Serper API anahtarı (2.500 ücretsiz arama) ekleyebilirsiniz.";
     setCached(cacheKey, fallback, 2 * 60 * 1000);
-    return fallback;
+    return { ...fallback, resolvedFromLink };
   }
 
   const $ = cheerio.load(html);
@@ -252,6 +269,7 @@ export async function searchProducts(query, options = {}) {
 
     const badge = $li.find(".db_v9").first().text().replace(/\s+/g, " ").trim();
     const unitInfo = extractUnitInfo(title, lowestPrice);
+    const isAccessory = isAccessoryTitle(title, q);
 
     seenIds.add(id);
     products.push({
@@ -263,6 +281,9 @@ export async function searchProducts(query, options = {}) {
       offerCount,
       badge: badge && badge !== "En Ucuz" ? badge : "",
       source: "Akakçe",
+      isOfficialStore: true,
+      isFreeShipping: false,
+      isAccessory,
       unitInfo,
     });
   });
@@ -275,11 +296,94 @@ export async function searchProducts(query, options = {}) {
     fetchedAt: new Date().toISOString(),
     cached: false,
     totalFound: products.length,
+    accessoryCount: products.filter((p) => p.isAccessory).length,
     products,
+    resolvedFromLink,
   };
 
   setCached(cacheKey, payload, SEARCH_TTL_MS);
   return payload;
+}
+
+/**
+ * Extracts a searchable query from an expired `virtual:` URL so watched items
+ * can be seamlessly re-fetched live after Render wakes from sleep.
+ */
+function extractQueryFromVirtualUrl(vUrl, fallbackTitle = "") {
+  const parts = String(vUrl || "").split(":");
+  // Patterns:
+  // virtual:serper:all:<encodedQuery>
+  // virtual:serper:<encodedQuery>:<idx>
+  // virtual:serper:cat:<encodedQuery>:<id>
+  if ((parts[1] === "serper" || parts[1] === "serpapi") && parts.length >= 4) {
+    const raw = parts[2] === "all" || parts[2] === "cat" ? parts[3] : parts[2];
+    try {
+      const decoded = decodeURIComponent(raw).trim();
+      if (decoded.length >= 2) return decoded;
+    } catch {
+      // Fall through
+    }
+  }
+  return String(fallbackTitle || "")
+    .replace(/^📊\s*/, "")
+    .replace(/\s*[—–-]\s*(Türkiye Mağaza.*|Tüm Mağazaları.*|Trendyol|Hepsiburada|Amazon.*|n11|Akakçe|Cimri).*$/i, "")
+    .trim();
+}
+
+/**
+ * Attaches personal recorded price snapshots as a chartable history series
+ * for products that don't carry an upstream 6-month table (e.g. Google TR / Migros / MarketFiyati).
+ */
+function attachPersonalSnapshots(detail) {
+  if (!detail || (Array.isArray(detail.history) && detail.history.length >= 2)) {
+    return detail;
+  }
+  const snapshots = getPriceSnapshots(detail.id, 90);
+  const currentNet = detail.stats?.minNet ?? detail.lowPrice;
+  const combined = [...snapshots];
+  if (typeof currentNet === "number" && currentNet > 0) {
+    const last = combined[combined.length - 1];
+    const nowIso = new Date().toISOString();
+    if (!last || Math.abs(last.net_price - currentNet) > 0.01 || Date.now() - Date.parse(last.captured_at) > 60000) {
+      combined.push({ net_price: currentNet, captured_at: nowIso });
+    }
+  }
+
+  if (combined.length < 2) {
+    return {
+      ...detail,
+      personalHistoryCount: combined.length,
+    };
+  }
+
+  // Convert snapshots to chart points
+  const points = combined.map((s, idx) => {
+    const d = new Date(s.captured_at);
+    const dd = String(d.getDate()).padStart(2, "0");
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const yyyy = d.getFullYear();
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    const prevPrice = idx > 0 ? combined[idx - 1].net_price : s.net_price;
+    const delta = Math.round((s.net_price - prevPrice) * 100) / 100;
+    const pct = prevPrice > 0 ? Math.round((delta / prevPrice) * 1000) / 10 : 0;
+    return {
+      isoDate: s.captured_at,
+      dateLabel: `${dd}.${mm}.${yyyy} ${hh}:${mi}`,
+      price: s.net_price,
+      delta,
+      pctLabel: delta !== 0 ? `%${Math.abs(pct)}` : "",
+    };
+  });
+
+  const histAnalysis = analyzePriceHistory(points, currentNet);
+  return {
+    ...detail,
+    history: histAnalysis.points,
+    historySummary: histAnalysis.summary,
+    isPersonalHistory: true,
+    personalHistoryCount: points.length,
+  };
 }
 
 /**
@@ -291,13 +395,60 @@ export async function getProductDetail(rawUrl, options = {}) {
     throw new Error("Geçersiz ürün bağlantısı.");
   }
 
-  // Handle virtual provider product detail (Google Shopping TR, T.C. Market Fiyatı, Migros)
+  // Handle virtual provider product detail (Google TR, T.C. Market Fiyatı, Migros)
   if (url.startsWith("virtual:")) {
-    const cachedVirtual = getVirtualDetail(url);
-    if (cachedVirtual) {
-      return cachedVirtual;
+    if (!options.refresh) {
+      const cachedVirtual = getVirtualDetail(url);
+      if (cachedVirtual) {
+        return attachPersonalSnapshots(cachedVirtual);
+      }
     }
-    throw new Error("Bu ürünün geçici analiz oturumu süresi doldu. Lütfen ürünü yeniden aratın.");
+
+    // Auto-rehydrate expired or refreshed virtual URL by re-running live search!
+    const watched = getWatchlistItemByUrl(url);
+    const reQuery = extractQueryFromVirtualUrl(url, options.fallbackQuery || watched?.title || "");
+    if (!reQuery) {
+      throw new Error("Bu ürünün geçici analiz oturumu süresi doldu. Lütfen ürünü yeniden aratın.");
+    }
+
+    const freshSearch = await searchProducts(reQuery, {
+      refresh: true,
+      serperKey: options.serperKey,
+      serpApiKey: options.serpApiKey,
+    });
+
+    // Try exact virtual key first, then aggregateUrl, then first virtual or real Akakce product
+    let rehydrated =
+      getVirtualDetail(url) ||
+      (freshSearch.aggregateUrl ? getVirtualDetail(freshSearch.aggregateUrl) : null) ||
+      (freshSearch.products?.[0]?.url?.startsWith("virtual:")
+        ? getVirtualDetail(freshSearch.products[0].url)
+        : null);
+
+    if (!rehydrated && freshSearch.products?.[0]?.url?.startsWith("https://")) {
+      try {
+        rehydrated = await getProductDetail(freshSearch.products[0].url, {
+          refresh: Boolean(options.refresh),
+          serperKey: options.serperKey,
+          serpApiKey: options.serpApiKey,
+        });
+      } catch {
+        // Fall through to error message below
+      }
+    }
+
+    if (rehydrated) {
+      // Preserve stable watchlist URL & id when rehydrated so snapshots stay linked
+      const stableDetail = {
+        ...rehydrated,
+        id: watched?.id || rehydrated.id,
+        url,
+        rehydrated: true,
+      };
+      return attachPersonalSnapshots(stableDetail);
+    }
+
+    throw new Error(`"${reQuery}" için güncel mağaza verisi yenilenemedi. Lütfen tekrar aratın.`);
   }
 
   const cacheKey = `detail:${url}`;

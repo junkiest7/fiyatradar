@@ -4,13 +4,14 @@
  * with cache fallback when offline.
  */
 
-const CACHE_NAME = "fiyatradar-v4";
+const CACHE_NAME = "fiyatradar-v5";
 const SHELL_ASSETS = [
   "/",
   "/index.html",
   "/styles.css",
   "/app.js",
   "/chart.js",
+  "/scanner.js",
   "/manifest.webmanifest",
   "/icons/apple-touch-icon.png",
   "/icons/icon-192.png",

@@ -2234,20 +2234,20 @@ body {
     min-height: 40px;
   }
 
-  /* Native iOS Frosted-Glass Bottom Tab Bar */
+  /* Native iOS Frosted-Glass 5-Tab Bottom Bar */
   .mobile-tab-bar {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     position: fixed;
     left: 0;
     right: 0;
     bottom: 0;
     z-index: 55;
-    background: rgba(255, 255, 255, 0.9);
+    background: rgba(255, 255, 255, 0.92);
     backdrop-filter: blur(18px);
     -webkit-backdrop-filter: blur(18px);
     border-top: 1px solid var(--border);
-    padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px));
+    padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px));
   }
 
   .mobile-tab {
@@ -2260,7 +2260,7 @@ body {
     justify-content: center;
     gap: 3px;
     min-height: 48px;
-    font-size: 0.69rem;
+    font-size: 0.67rem;
     font-weight: 600;
     cursor: pointer;
     border-radius: 10px;
@@ -2309,12 +2309,364 @@ body {
     bottom: calc(74px + env(safe-area-inset-bottom, 0px));
     text-align: center;
   }
+
+  .strategy-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .installment-outputs {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 390px) {
   .results-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* ==========================================================================
+   v5 Features: Barcode Scanner, Quick Filters, Installments, Cart Optimizer
+   ========================================================================== */
+
+.search-input.has-barcode {
+  padding-right: 84px;
+}
+
+.clear-btn.has-barcode {
+  right: 46px;
+}
+
+.barcode-btn {
+  position: absolute;
+  right: 7px;
+  border: 1px solid var(--border);
+  background: var(--bg-page);
+  color: var(--ink-secondary);
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.barcode-btn:hover {
+  background: var(--primary-soft);
+  color: var(--primary);
+  border-color: #b7ccfa;
+}
+
+.link-resolved-banner {
+  background: var(--good-soft);
+  border: 1px solid var(--good-border);
+  color: var(--good);
+  border-radius: var(--radius-md);
+  padding: 11px 15px;
+  margin-bottom: 14px;
+  font-size: 0.85rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* Horizontal Scrollable Quick Filter Bar */
+.quick-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 0 14px;
+  margin-bottom: 4px;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.quick-filter-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.filter-chip {
+  flex-shrink: 0;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-surface);
+  color: var(--ink-secondary);
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.filter-chip:hover {
+  background: var(--bg-subtle);
+  color: var(--ink);
+}
+
+.filter-chip.active {
+  background: var(--ink);
+  color: #fff;
+  border-color: var(--ink);
+}
+
+.filter-chip.good-active {
+  background: var(--good);
+  color: #fff;
+  border-color: var(--good);
+}
+
+/* Installment Calculator Panel */
+.installment-panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 18px 20px;
+  margin-bottom: 20px;
+  box-shadow: var(--shadow-sm);
+}
+
+.installment-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.installment-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.inst-pill {
+  border: 1px solid var(--border-strong);
+  background: var(--bg-page);
+  color: var(--ink-secondary);
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.inst-pill.active {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+
+.installment-outputs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.inst-stat {
+  background: var(--bg-page);
+  border: 1px solid var(--bg-subtle);
+  border-radius: var(--radius-sm);
+  padding: 11px 13px;
+}
+
+.inst-stat-label {
+  font-size: 0.75rem;
+  color: var(--ink-muted);
+  margin-bottom: 3px;
+}
+
+.inst-stat-value {
+  font-family: var(--font-mono);
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+/* Shopping Cart Cost Optimizer */
+.cart-item-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  display: grid;
+  grid-template-columns: 56px 1fr auto;
+  gap: 14px;
+  align-items: center;
+}
+
+.qty-stepper {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-page);
+}
+
+.qty-stepper button {
+  border: none;
+  background: transparent;
+  width: 32px;
+  height: 32px;
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  color: var(--ink);
+}
+
+.qty-stepper button:hover {
+  background: var(--bg-subtle);
+}
+
+.qty-stepper span {
+  min-width: 28px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 0.88rem;
+}
+
+.optimizer-verdict {
+  background: var(--good-soft);
+  border: 1px solid var(--good-border);
+  border-radius: var(--radius-lg);
+  padding: 18px 20px;
+  margin: 18px 0;
+}
+
+.optimizer-verdict h3 {
+  margin: 0 0 6px;
+  font-size: 1.06rem;
+  color: var(--good);
+}
+
+.optimizer-verdict p {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--ink-secondary);
+}
+
+.strategy-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 14px;
+}
+
+.strategy-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.strategy-card.winner {
+  border-color: var(--good);
+  box-shadow: var(--shadow-md);
+}
+
+.strategy-total {
+  font-family: var(--font-mono);
+  font-size: 1.45rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.strategy-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.strategy-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--bg-page);
+  border-radius: 8px;
+  font-size: 0.83rem;
+}
+
+/* Barcode Scanner Modal */
+.scanner-sheet {
+  width: min(460px, 100%);
+}
+
+.scanner-viewport {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background: #0f131c;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.scanner-viewport video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.scanner-frame {
+  position: absolute;
+  inset: 18% 12%;
+  border: 2px solid rgba(16, 185, 129, 0.9);
+  border-radius: 12px;
+  box-shadow: 0 0 0 9999px rgba(10, 14, 22, 0.45);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.scanner-laser {
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  height: 2px;
+  background: #10b981;
+  box-shadow: 0 0 8px #10b981;
+  animation: scanLaser 2s ease-in-out infinite;
+}
+
+@keyframes scanLaser {
+  0%,
+  100% {
+    top: 14%;
+  }
+  50% {
+    top: 84%;
+  }
+}
+
+.manual-barcode-form {
+  display: flex;
+  gap: 8px;
+}
+
+.manual-barcode-form input {
+  flex: 1;
+}
+
+.product-card-actions-mini {
+  display: flex;
+  gap: 6px;
+}
+
+.btn-cart-toggle.selected {
+  background: var(--good-soft);
+  color: var(--good);
+  border-color: var(--good-border);
 }
 
 /* Print Report Mode */
@@ -2327,6 +2679,7 @@ body {
   .floating-compare,
   .mobile-tab-bar,
   .ios-install-banner,
+  .modal-backdrop,
   .footer {
     display: none !important;
   }
@@ -2341,4 +2694,5 @@ body {
     break-inside: avoid;
   }
 }
+
 

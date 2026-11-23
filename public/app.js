@@ -6,22 +6,37 @@
  */
 
 import { renderPriceChart } from "./chart.js";
+import { startScanner, stopScanner } from "./scanner.js";
 
 const state = {
-  activeView: "search", // 'search' | 'detail' | 'compare' | 'watchlist' | 'history'
+  activeView: "search", // 'search' | 'detail' | 'compare' | 'cart' | 'watchlist' | 'history'
   lastQuery: "",
   searchData: null,
+  searchFilters: {
+    hideAccessories: true,
+    pricedOnly: false,
+    officialOnly: false,
+    freeShippingOnly: false,
+    store: "",
+  },
   currentDetail: null,
   chartRange: "all",
+  installment: {
+    months: 3,
+    monthlyRate: 0,
+  },
   offerSort: "net_asc",
   offerFilters: {
     freeShippingOnly: false,
     inStockOnly: false,
     hideOutliers: false,
+    hideSuspicious: false,
     storeSearch: "",
   },
   compareBasket: loadLocalCompare(), // [{ id, title, url, image, lowestPrice }]
   compareResult: null,
+  cart: loadLocalCart(), // [{ id, title, url, image, lowestPrice, quantity }]
+  cartPlan: null,
   watchlist: [],
   history: [],
   suggestIndex: -1,
@@ -36,13 +51,18 @@ const els = {
   searchForm: $("searchForm"),
   searchInput: $("searchInput"),
   clearSearchBtn: $("clearSearchBtn"),
+  openScannerBtn: $("openScannerBtn"),
   suggestList: $("suggestList"),
   statusBanner: $("statusBanner"),
   viewSearch: $("viewSearch"),
   viewDetail: $("viewDetail"),
   viewCompare: $("viewCompare"),
+  viewCart: $("viewCart"),
   viewWatchlist: $("viewWatchlist"),
   viewHistory: $("viewHistory"),
+  linkResolvedBanner: $("linkResolvedBanner"),
+  fallbackNoticeBanner: $("fallbackNoticeBanner"),
+  quickFilterBar: $("quickFilterBar"),
   resultsHeading: $("resultsHeading"),
   resultsSubmeta: $("resultsSubmeta"),
   resultsGrid: $("resultsGrid"),
@@ -51,6 +71,7 @@ const els = {
   filterMaxPrice: $("filterMaxPrice"),
   applyPriceFilterBtn: $("applyPriceFilterBtn"),
   detailContainer: $("detailContainer"),
+  detailCartToggleBtn: $("detailCartToggleBtn"),
   detailShareBtn: $("detailShareBtn"),
   detailCompareToggleBtn: $("detailCompareToggleBtn"),
   detailRefreshBtn: $("detailRefreshBtn"),
@@ -59,8 +80,10 @@ const els = {
   printReportBtn: $("printReportBtn"),
   backToResultsBtn: $("backToResultsBtn"),
   compareBadge: $("compareBadge"),
+  cartBadge: $("cartBadge"),
   watchlistBadge: $("watchlistBadge"),
   mobileCompareBadge: $("mobileCompareBadge"),
+  mobileCartBadge: $("mobileCartBadge"),
   mobileWatchlistBadge: $("mobileWatchlistBadge"),
   iosInstallBanner: $("iosInstallBanner"),
   dismissIosBannerBtn: $("dismissIosBannerBtn"),
@@ -72,11 +95,20 @@ const els = {
   serpApiKeyInput: $("serpApiKeyInput"),
   clearApiKeysBtn: $("clearApiKeysBtn"),
   apiReadyDot: $("apiReadyDot"),
-  fallbackNoticeBanner: $("fallbackNoticeBanner"),
+  scannerModal: $("scannerModal"),
+  closeScannerBtn: $("closeScannerBtn"),
+  scannerVideo: $("scannerVideo"),
+  scannerStatus: $("scannerStatus"),
+  manualBarcodeForm: $("manualBarcodeForm"),
+  manualBarcodeInput: $("manualBarcodeInput"),
   compareBasketBar: $("compareBasketBar"),
   compareResultContainer: $("compareResultContainer"),
   runCompareBtn: $("runCompareBtn"),
   clearCompareBtn: $("clearCompareBtn"),
+  cartItemsContainer: $("cartItemsContainer"),
+  cartPlanContainer: $("cartPlanContainer"),
+  optimizeCartBtn: $("optimizeCartBtn"),
+  clearCartBtn: $("clearCartBtn"),
   watchlistContainer: $("watchlistContainer"),
   refreshWatchlistBtn: $("refreshWatchlistBtn"),
   historyContainer: $("historyContainer"),
@@ -174,6 +206,24 @@ function saveLocalCompare() {
   updateCompareBadges();
 }
 
+function loadLocalCart() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem("fiyatradar_cart") || "[]");
+    return Array.isArray(parsed) ? parsed.slice(0, 12) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalCart() {
+  try {
+    localStorage.setItem("fiyatradar_cart", JSON.stringify(state.cart));
+  } catch {
+    // Ignore
+  }
+  updateCartBadges();
+}
+
 function loadLocalWatchlist() {
   try {
     const parsed = JSON.parse(localStorage.getItem("fiyatradar_watchlist") || "[]");
@@ -191,6 +241,110 @@ function saveLocalWatchlist(items) {
   }
 }
 
+// Local iPhone personal price snapshots (survives cloud restarts!)
+function recordLocalSnapshot(key, netPrice) {
+  if (!key || typeof netPrice !== "number" || !Number.isFinite(netPrice) || netPrice <= 0) return [];
+  try {
+    const all = JSON.parse(localStorage.getItem("fiyatradar_snapshots") || "{}");
+    const list = Array.isArray(all[key]) ? all[key] : [];
+    const nowIso = new Date().toISOString();
+    const last = list[list.length - 1];
+    // Record if first entry, price changed, or >30 minutes elapsed
+    if (!last || Math.abs(last.price - netPrice) > 0.01 || Date.now() - Date.parse(last.isoDate) > 30 * 60 * 1000) {
+      list.push({ isoDate: nowIso, price: netPrice });
+    }
+    all[key] = list.slice(-60);
+    localStorage.setItem("fiyatradar_snapshots", JSON.stringify(all));
+    return all[key];
+  } catch {
+    return [];
+  }
+}
+
+function mergePersonalPriceHistory(detail) {
+  if (!detail) return detail;
+  const currentNet = detail.stats?.minNet ?? detail.lowPrice;
+  const snapKey = detail.url || detail.id;
+  const localSnaps = recordLocalSnapshot(snapKey, currentNet);
+
+  // If upstream already has rich >= 3 point history (e.g. Akakce 6 months), keep it
+  if (Array.isArray(detail.history) && detail.history.length >= 3 && !detail.isPersonalHistory) {
+    return detail;
+  }
+
+  // Merge server snapshots + local iPhone snapshots
+  const mergedMap = new Map();
+  for (const pt of detail.history || []) {
+    if (pt?.isoDate && pt?.price > 0) mergedMap.set(pt.isoDate.slice(0, 16), { isoDate: pt.isoDate, price: pt.price });
+  }
+  for (const ls of localSnaps) {
+    if (ls?.isoDate && ls?.price > 0) mergedMap.set(ls.isoDate.slice(0, 16), { isoDate: ls.isoDate, price: ls.price });
+  }
+
+  const sorted = [...mergedMap.values()].sort((a, b) => a.isoDate.localeCompare(b.isoDate));
+  if (sorted.length < 2) {
+    return { ...detail, personalHistoryCount: sorted.length };
+  }
+
+  const points = sorted.map((s, idx) => {
+    const d = new Date(s.isoDate);
+    const dd = String(d.getDate()).padStart(2, "0");
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const yyyy = d.getFullYear();
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mi = String(d.getMinutes()).padStart(2, "0");
+    const prev = idx > 0 ? sorted[idx - 1].price : s.price;
+    const delta = Math.round((s.price - prev) * 100) / 100;
+    const pct = prev > 0 ? Math.round((delta / prev) * 1000) / 10 : 0;
+    const start = Math.max(0, idx - 6);
+    const slice = sorted.slice(start, idx + 1);
+    const ma7 = Math.round((slice.reduce((acc, x) => acc + x.price, 0) / slice.length) * 100) / 100;
+    return {
+      isoDate: s.isoDate,
+      dateLabel: `${dd}.${mm}.${yyyy} ${hh}:${mi}`,
+      price: s.price,
+      delta,
+      pctLabel: delta !== 0 ? `%${Math.abs(pct)}` : "",
+      ma7,
+    };
+  });
+
+  const prices = points.map((p) => p.price);
+  let minPt = points[0];
+  let maxPt = points[0];
+  for (const p of points) {
+    if (p.price < minPt.price) minPt = p;
+    if (p.price > maxPt.price) maxPt = p;
+  }
+  const avgAll = Math.round((prices.reduce((a, b) => a + b, 0) / prices.length) * 100) / 100;
+  const firstP = points[0].price;
+  const latestP = points[points.length - 1].price;
+  const changePct = firstP > 0 ? Math.round(((latestP - firstP) / firstP) * 1000) / 10 : 0;
+  const diffFromMinPct = minPt.price > 0 ? Math.round(((latestP - minPt.price) / minPt.price) * 1000) / 10 : 0;
+  const variance = prices.reduce((s, v) => s + (v - avgAll) ** 2, 0) / prices.length;
+  const volatilityPct = avgAll > 0 ? Math.round((Math.sqrt(variance) / avgAll) * 1000) / 10 : 0;
+
+  return {
+    ...detail,
+    isPersonalHistory: true,
+    personalHistoryCount: points.length,
+    history: points,
+    historySummary: {
+      dataPoints: points.length,
+      startDate: points[0].dateLabel,
+      endDate: points[points.length - 1].dateLabel,
+      minPrice: minPt.price,
+      minDate: minPt.dateLabel,
+      maxPrice: maxPt.price,
+      maxDate: maxPt.dateLabel,
+      avg30: avgAll,
+      change30dPct: changePct,
+      diffFromMinPct,
+      volatilityPct,
+    },
+  };
+}
+
 function updateCompareBadges() {
   const count = state.compareBasket.length;
   els.compareBadge.textContent = String(count);
@@ -203,6 +357,18 @@ function updateCompareBadges() {
   els.floatingCompareCount.textContent = `${count} ürün`;
   els.floatingCompareBar.hidden =
     count === 0 || state.activeView === "compare";
+}
+
+function updateCartBadges() {
+  const count = state.cart.reduce((s, it) => s + (it.quantity || 1), 0);
+  if (els.cartBadge) {
+    els.cartBadge.textContent = String(count);
+    els.cartBadge.hidden = count === 0;
+  }
+  if (els.mobileCartBadge) {
+    els.mobileCartBadge.textContent = String(count);
+    els.mobileCartBadge.hidden = count === 0;
+  }
 }
 
 function updateWatchlistBadge() {
@@ -222,11 +388,13 @@ function switchView(view) {
     search: els.viewSearch,
     detail: els.viewDetail,
     compare: els.viewCompare,
+    cart: els.viewCart,
     watchlist: els.viewWatchlist,
     history: els.viewHistory,
   };
 
   for (const [k, node] of Object.entries(views)) {
+    if (!node) continue;
     if (k === "search") {
       node.hidden = !(view === "search" && Boolean(state.searchData));
     } else {
@@ -240,10 +408,11 @@ function switchView(view) {
     btn.classList.toggle("active", isActive);
   });
 
-  // Compact hero when viewing results or detail
+  // Compact hero when viewing results or sub-views
   const shouldCompact =
     view === "detail" ||
     view === "compare" ||
+    view === "cart" ||
     view === "watchlist" ||
     view === "history" ||
     (view === "search" && Boolean(state.searchData));
@@ -252,6 +421,7 @@ function switchView(view) {
   updateCompareBadges();
 
   if (view === "compare") renderCompareView();
+  if (view === "cart") renderCartView();
   if (view === "watchlist") loadWatchlist();
   if (view === "history") loadHistory();
 }
@@ -335,6 +505,13 @@ async function performSearch(query, opts = {}) {
   const q = (query || "").trim();
   if (!q) return;
   hideSuggestions();
+
+  // If user typed or pasted a raw EAN/UPC barcode directly into the main search box
+  if (!opts.fromBarcode && /^\d{8,14}$/.test(q)) {
+    lookupBarcode(q);
+    return;
+  }
+
   state.lastQuery = q;
   els.searchInput.value = q;
   els.clearSearchBtn.hidden = false;
@@ -348,20 +525,37 @@ async function performSearch(query, opts = {}) {
   if (maxPrice) params.set("maxPrice", maxPrice);
   if (opts.refresh) params.set("refresh", "1");
 
-  setStatus("loading", `"${q}" için Türkiye e-ticaret piyasası taranıyor...`);
+  const isUrl = /^https?:\/\//i.test(q);
+  setStatus(
+    "loading",
+    isUrl
+      ? "Mağaza bağlantısı çözülüyor ve diğer tüm Türkiye mağazaları taranıyor..."
+      : `"${q}" için Türkiye e-ticaret piyasası taranıyor...`
+  );
 
   try {
     const data = await apiFetch(`/api/search?${params.toString()}`);
     setStatus(null);
 
     if (data.directProduct && data.detail) {
-      state.currentDetail = data.detail;
+      state.currentDetail = mergePersonalPriceHistory(data.detail);
       switchView("detail");
       renderDetailView();
       return;
     }
 
     state.searchData = data;
+    // Reset per-search quick filters cleanly; hide accessories automatically when non-accessories exist
+    const hasAccessories = (data.products || []).some((p) => p.isAccessory);
+    const hasPrimary = (data.products || []).some((p) => !p.isAccessory);
+    state.searchFilters = {
+      hideAccessories: hasAccessories && hasPrimary,
+      pricedOnly: false,
+      officialOnly: false,
+      freeShippingOnly: false,
+      store: "",
+    };
+
     switchView("search");
     renderSearchResults();
   } catch (err) {
@@ -369,13 +563,100 @@ async function performSearch(query, opts = {}) {
   }
 }
 
+function getFilteredSearchProducts() {
+  const all = state.searchData?.products || [];
+  const f = state.searchFilters;
+  return all.filter((p) => {
+    if (f.hideAccessories && p.isAccessory) return false;
+    if (f.pricedOnly && !(typeof p.lowestPrice === "number" && p.lowestPrice > 0)) return false;
+    if (f.officialOnly && !p.isOfficialStore) return false;
+    if (f.freeShippingOnly && !p.isFreeShipping) return false;
+    if (f.store) {
+      const storeLabel = (p.badge || p.source || "").toLocaleLowerCase("tr-TR");
+      if (storeLabel !== f.store.toLocaleLowerCase("tr-TR")) return false;
+    }
+    return true;
+  });
+}
+
+function renderQuickFilterBar() {
+  if (!els.quickFilterBar) return;
+  const all = state.searchData?.products || [];
+  if (!all.length) {
+    els.quickFilterBar.hidden = true;
+    els.quickFilterBar.innerHTML = "";
+    return;
+  }
+
+  const f = state.searchFilters;
+  const accCount = all.filter((p) => p.isAccessory).length;
+  const freeShipCount = all.filter((p) => p.isFreeShipping).length;
+  const pricedCount = all.filter((p) => typeof p.lowestPrice === "number" && p.lowestPrice > 0).length;
+
+  // Dynamic top stores present in current results
+  const storeCounts = new Map();
+  for (const p of all) {
+    const label = p.badge || p.source || "";
+    if (!label || label === "Tüm Mağazalar" || label === "Akakçe") continue;
+    storeCounts.set(label, (storeCounts.get(label) || 0) + 1);
+  }
+  const topStores = [...storeCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6);
+
+  const chips = [];
+  const anyActive = f.pricedOnly || f.officialOnly || f.freeShippingOnly || Boolean(f.store);
+  chips.push(
+    `<button type="button" class="filter-chip ${!anyActive && !f.hideAccessories ? "active" : ""}" data-qfilter="reset">Tümü (${all.length})</button>`
+  );
+
+  if (accCount > 0) {
+    chips.push(
+      `<button type="button" class="filter-chip ${f.hideAccessories ? "good-active" : ""}" data-qfilter="hideAccessories">${f.hideAccessories ? "✓ " : ""}Aksesuarları Gizle (${accCount})</button>`
+    );
+  }
+  if (pricedCount > 0 && pricedCount < all.length) {
+    chips.push(
+      `<button type="button" class="filter-chip ${f.pricedOnly ? "active" : ""}" data-qfilter="pricedOnly">Sadece Fiyatlı (${pricedCount})</button>`
+    );
+  }
+  if (freeShipCount > 0) {
+    chips.push(
+      `<button type="button" class="filter-chip ${f.freeShippingOnly ? "active" : ""}" data-qfilter="freeShippingOnly">Ücretsiz Kargo (${freeShipCount})</button>`
+    );
+  }
+  if (topStores.length >= 2) {
+    chips.push(
+      `<button type="button" class="filter-chip ${f.officialOnly ? "active" : ""}" data-qfilter="officialOnly">Resmi / Büyük Mağaza</button>`
+    );
+    for (const [storeName, count] of topStores) {
+      chips.push(
+        `<button type="button" class="filter-chip ${f.store === storeName ? "active" : ""}" data-qstore="${esc(storeName)}">${esc(storeName)} (${count})</button>`
+      );
+    }
+  }
+
+  els.quickFilterBar.hidden = false;
+  els.quickFilterBar.innerHTML = chips.join("");
+}
+
 function renderSearchResults() {
   const data = state.searchData;
   if (!data) return;
 
-  els.resultsHeading.textContent = `"${data.query}" sonuçları`;
-  const providerTag = data.provider ? ` · Kaynak: ${data.provider}` : "";
-  els.resultsSubmeta.textContent = `${data.filteredCount} / ${data.totalFound} ürün listelendi${providerTag}${data.cached ? " · Önbellek" : " · Canlı"}`;
+  // Show link-resolved banner when user pasted a Trendyol/Hepsiburada/Amazon/Zara/Stradivarius link
+  if (els.linkResolvedBanner) {
+    if (data.resolvedFromLink?.resolvedQuery) {
+      els.linkResolvedBanner.hidden = false;
+      els.linkResolvedBanner.innerHTML = `
+        <span><strong>✓ ${esc(data.resolvedFromLink.sourceStore)} bağlantısı çözüldü:</strong> "${esc(data.resolvedFromLink.resolvedQuery)}" için diğer tüm Türkiye mağazaları tarandı.</span>
+        <a href="${esc(data.resolvedFromLink.expandedUrl || data.resolvedFromLink.originalUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-sm">Orijinal Link ↗</a>
+      `;
+    } else {
+      els.linkResolvedBanner.hidden = true;
+      els.linkResolvedBanner.innerHTML = "";
+    }
+  }
 
   if (els.fallbackNoticeBanner) {
     if (data.fallbackNotice) {
@@ -384,7 +665,7 @@ function renderSearchResults() {
         <div class="fallback-notice-text">
           <strong>Yedek Canlı Kaynak Aktif:</strong> ${esc(data.fallbackNotice)}
         </div>
-        <button type="button" class="btn btn-primary btn-sm" id="fallbackOpenSettingsBtn">50+ Mağazayı Aç (Ücretsiz API)</button>
+        <button type="button" class="btn btn-primary btn-sm" id="fallbackOpenSettingsBtn">70+ Mağazayı Aç (Ücretsiz API)</button>
       `;
       $("fallbackOpenSettingsBtn")?.addEventListener("click", openSettingsModal);
     } else {
@@ -393,31 +674,44 @@ function renderSearchResults() {
     }
   }
 
-  if (!data.products.length) {
+  renderQuickFilterBar();
+
+  const visibleProducts = getFilteredSearchProducts();
+  els.resultsHeading.textContent = `"${data.query}" sonuçları`;
+  const providerTag = data.provider ? ` · Kaynak: ${data.provider}` : "";
+  els.resultsSubmeta.textContent = `${visibleProducts.length} / ${data.totalFound} ürün listelendi${providerTag}${data.cached ? " · Önbellek" : " · Canlı"}`;
+
+  if (!visibleProducts.length) {
     els.resultsGrid.innerHTML = `
       <div class="empty-state" style="grid-column:1/-1;">
         <h3>Eşleşen ürün bulunamadı</h3>
         <p>${
-          data.fallbackMode
-            ? "Bu ürün Migros Elektronik / T.C. Market Fiyatı kataloğunda bulunamadı. Trendyol, Hepsiburada, Amazon TR, n11 ve MediaMarkt dahil tüm Türkiye mağazalarını taramak için Ayarlar'dan ücretsiz Serper API anahtarı (2.500 ücretsiz arama) ekleyebilirsiniz."
-            : "Fiyat filtresini gevşetmeyi veya daha genel bir model adı denemeyi düşünün."
+          data.products.length > 0
+            ? "Seçili mağaza veya aksesuar filtresi sonuçları gizledi. Yukarıdaki 'Tümü' çipine dokunarak tüm sonuçları görebilirsiniz."
+            : data.fallbackMode
+              ? "Bu ürün Migros Elektronik / T.C. Market Fiyatı kataloğunda bulunamadı. Trendyol, Hepsiburada, Amazon TR, n11, Stradivarius ve MediaMarkt dahil tüm Türkiye mağazalarını taramak için Ayarlar'dan ücretsiz Serper API anahtarı ekleyebilirsiniz."
+              : "Fiyat filtresini gevşetmeyi veya daha genel bir model adı denemeyi düşünün."
         }</p>
-        ${data.fallbackMode ? `<button type="button" class="btn btn-primary btn-sm" id="emptyOpenSettingsBtn" style="margin-top:10px;">Ücretsiz 50+ Mağaza API Ayarla</button>` : ""}
+        ${data.fallbackMode && !data.products.length ? `<button type="button" class="btn btn-primary btn-sm" id="emptyOpenSettingsBtn" style="margin-top:10px;">Ücretsiz 70+ Mağaza API Ayarla</button>` : ""}
       </div>`;
     $("emptyOpenSettingsBtn")?.addEventListener("click", openSettingsModal);
     return;
   }
 
-  els.resultsGrid.innerHTML = data.products
+  els.resultsGrid.innerHTML = visibleProducts
     .map((p) => {
       const inCompare = state.compareBasket.some((c) => c.url === p.url);
+      const inCart = state.cart.some((c) => c.url === p.url);
       const isCatalogOnly = !p.lowestPrice && Boolean(p.externalUrl);
       return `
         <article class="product-card" data-url="${esc(p.url)}">
           <div class="product-card-media" data-action="open-detail">
             ${p.image ? `<img src="${esc(p.image)}" alt="${esc(p.title)}" loading="lazy" />` : `<span class="muted-text">Görsel yok</span>`}
           </div>
-          ${p.badge ? `<span class="offer-pill" style="align-self:flex-start;">${esc(p.badge)}</span>` : ""}
+          <div style="display:flex;flex-wrap:wrap;gap:5px;align-items:center;">
+            ${p.badge ? `<span class="offer-pill">${esc(p.badge)}</span>` : ""}
+            ${p.isAccessory ? `<span class="mini-badge trap">Aksesuar</span>` : ""}
+          </div>
           <h3 class="product-card-title" data-action="open-detail" title="${esc(p.title)}">${esc(p.title)}</h3>
           ${p.unitInfo ? `<div class="unit-pill" title="Otomatik birim maliyet (${esc(p.unitInfo.rawMatch)})">${esc(p.unitInfo.formatted)}</div>` : ""}
           <div class="product-card-pricing">
@@ -430,9 +724,14 @@ function renderSearchResults() {
                 ? `<a href="${esc(p.externalUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm btn-analyze">Mağazada Aç ↗</a>`
                 : `<button type="button" class="btn btn-primary btn-sm btn-analyze" data-action="open-detail">Detaylı Analiz</button>`
             }
-            <button type="button" class="btn btn-secondary btn-sm btn-compare-toggle ${inCompare ? "selected" : ""}" data-action="toggle-compare" title="Karşılaştırma listesine ekle/çıkar">
-              ${inCompare ? "✓ Listede" : "+ Kıyasla"}
-            </button>
+            <div class="product-card-actions-mini">
+              <button type="button" class="btn btn-secondary btn-sm btn-cart-toggle ${inCart ? "selected" : ""}" data-action="toggle-cart" title="Sepet maliyet optimizatörüne ekle">
+                ${inCart ? "✓ Sepet" : "+ Sepet"}
+              </button>
+              <button type="button" class="btn btn-secondary btn-sm btn-compare-toggle ${inCompare ? "selected" : ""}" data-action="toggle-compare" title="Karşılaştırma listesine ekle/çıkar">
+                ${inCompare ? "✓" : "+ Kıyasla"}
+              </button>
+            </div>
           </div>
         </article>
       `;
@@ -443,24 +742,26 @@ function renderSearchResults() {
 // ============================================================================
 // DEEP PRODUCT DETAIL VIEW
 // ============================================================================
-async function openProductDetail(url, refresh = false) {
+async function openProductDetail(url, refresh = false, fallbackTitle = "") {
   if (!url) return;
-  setStatus("loading", "Tüm mağazalardan kargo dahil teklifler ve 6 aylık fiyat geçmişi analiz ediliyor...");
+  setStatus("loading", "Tüm mağazalardan kargo dahil teklifler ve fiyat geçmişi analiz ediliyor...");
   window.scrollTo({ top: 0, behavior: "smooth" });
 
   try {
     const params = new URLSearchParams({ url });
     if (refresh) params.set("refresh", "1");
+    if (fallbackTitle) params.set("title", fallbackTitle);
     const detail = await apiFetch(`/api/product?${params.toString()}`);
     setStatus(null);
 
-    state.currentDetail = detail;
+    state.currentDetail = mergePersonalPriceHistory(detail);
     state.chartRange = "all";
     state.offerSort = "net_asc";
     state.offerFilters = {
       freeShippingOnly: false,
       inStockOnly: false,
       hideOutliers: false,
+      hideSuspicious: Boolean(detail.stats?.suspiciousLowCount > 0),
       storeSearch: "",
     };
 
@@ -471,13 +772,34 @@ async function openProductDetail(url, refresh = false) {
   }
 }
 
+function computeInstallment(principal, months, monthlyRatePct) {
+  if (!principal || principal <= 0) return { monthly: 0, total: 0, extra: 0 };
+  if (months <= 1 || monthlyRatePct <= 0) {
+    const monthly = Math.round((principal / Math.max(1, months)) * 100) / 100;
+    return { monthly, total: principal, extra: 0 };
+  }
+  const r = monthlyRatePct / 100;
+  const factor = (r * Math.pow(1 + r, months)) / (Math.pow(1 + r, months) - 1);
+  const monthly = Math.round(principal * factor * 100) / 100;
+  const total = Math.round(monthly * months * 100) / 100;
+  const extra = Math.round(Math.max(0, total - principal) * 100) / 100;
+  return { monthly, total, extra };
+}
+
 function renderDetailView() {
   const d = state.currentDetail;
   if (!d) return;
 
   const inCompare = state.compareBasket.some((c) => c.url === d.url);
-  els.detailCompareToggleBtn.textContent = inCompare ? "✓ Karşılaştırmada" : "+ Karşılaştır";
+  els.detailCompareToggleBtn.textContent = inCompare ? "✓ Kıyasla" : "+ Kıyasla";
   els.detailCompareToggleBtn.classList.toggle("selected", inCompare);
+
+  const inCart = state.cart.some((c) => c.url === d.url);
+  if (els.detailCartToggleBtn) {
+    els.detailCartToggleBtn.textContent = inCart ? "✓ Sepette" : "+ Sepet";
+    els.detailCartToggleBtn.classList.toggle("selected", inCart);
+  }
+
   els.backToResultsBtn.hidden = !state.searchData;
 
   const watched = state.watchlist.find((w) => w.url === d.url);
@@ -485,6 +807,12 @@ function renderDetailView() {
   const picks = d.picks;
   const hist = d.historySummary;
   const verdict = d.verdict || { score: 50, label: "Analiz", tone: "neutral", headline: "", reasons: [] };
+
+  const primaryExternalUrl = d.url.startsWith("https://") ? d.url : picks?.cheapestNet?.url || "";
+  const primaryExternalLabel = d.url.startsWith("https://") ? "Akakçe Sayfası ↗" : "En Ucuz Mağaza ↗";
+
+  const instPrice = stats?.minNet || d.lowPrice || 0;
+  const instCalc = computeInstallment(instPrice, state.installment.months, state.installment.monthlyRate);
 
   const html = `
     <!-- Overview + Buy Timing Verdict -->
@@ -517,7 +845,7 @@ function renderDetailView() {
           <button type="submit" class="btn ${watched ? "btn-good" : "btn-primary"} btn-sm">
             ${watched ? "✓ Takibi Güncelle" : "Takibe Al"}
           </button>
-          <a href="${esc(d.url)}" target="_blank" rel="noopener noreferrer" class="btn btn-ghost btn-sm">Akakçe Sayfası ↗</a>
+          ${primaryExternalUrl ? `<a href="${esc(primaryExternalUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-ghost btn-sm">${primaryExternalLabel}</a>` : ""}
         </form>
       </div>
 
@@ -552,12 +880,12 @@ function renderDetailView() {
         </div>
 
         <div class="kpi-card">
-          <div class="kpi-label">${hist ? "6 Aylık En Düşük Fiyat" : "Fiyat Aralığı (Min – Max)"}</div>
+          <div class="kpi-label">${hist ? (d.isPersonalHistory ? "Kayıtlı En Düşük Fiyat" : "6 Aylık En Düşük Fiyat") : "Fiyat Aralığı (Min – Max)"}</div>
           <div class="kpi-value">${hist ? fmtTL(hist.minPrice) : fmtTL(stats.maxNet)}</div>
           <div class="kpi-sub">
             ${
               hist
-                ? `${esc(hist.minDate)} tarihinde görüldü (${hist.diffFromMinPct <= 0.1 ? "Şu an dip seviyede!" : `şu an ${fmtPct(hist.diffFromMinPct)} yukarıda`})`
+                ? `${esc(hist.minDate)} (${hist.diffFromMinPct <= 0.1 ? "Şu an dip seviyede!" : `şu an ${fmtPct(hist.diffFromMinPct)} yukarıda`})`
                 : `Piyasa yayılımı: ${fmtPct(stats.marketSpreadPct, false)}`
             }
           </div>
@@ -566,7 +894,7 @@ function renderDetailView() {
         <div class="kpi-card">
           <div class="kpi-label">Kargo & Satıcı Özeti</div>
           <div class="kpi-value">${stats.freeShippingCount}/${stats.offerCountAnalyzed} <span style="font-size:0.82rem;font-weight:500;color:var(--ink-muted);">ücretsiz kargo</span></div>
-          <div class="kpi-sub">${d.platformBreakdown.length} farklı pazaryeri · ${stats.outlierCount > 0 ? `${stats.outlierCount} fahiş fiyat ayrıştırıldı` : "Fiyat dağılımı tutarlı"}</div>
+          <div class="kpi-sub">${d.platformBreakdown.length} farklı pazaryeri${stats.suspiciousLowCount > 0 ? ` · ${stats.suspiciousLowCount} şüpheli ucuz ayrıştırıldı` : stats.outlierCount > 0 ? ` · ${stats.outlierCount} fahiş fiyat ayrıştırıldı` : " · Fiyat dağılımı tutarlı"}</div>
         </div>
       </div>
     `
@@ -598,6 +926,54 @@ function renderDetailView() {
         : ""
     }
 
+    <!-- Credit Card Installment Calculator -->
+    ${
+      instPrice > 0
+        ? `
+      <section class="installment-panel">
+        <div class="installment-controls">
+          <div>
+            <h3 style="margin:0;font-size:1rem;font-weight:800;">Taksit & Aylık Ödeme Hesaplayıcı</h3>
+            <p class="muted-text" style="margin:2px 0 0;">En ucuz net fiyat (${fmtTL(instPrice)}) üzerinden tahmini ödeme planı</p>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+            <div class="installment-pills" id="installmentMonthPills">
+              ${[1, 3, 6, 9, 12]
+                .map(
+                  (m) => `
+                <button type="button" class="inst-pill ${state.installment.months === m ? "active" : ""}" data-months="${m}">
+                  ${m === 1 ? "Peşin" : `${m} Taksit`}
+                </button>`
+                )
+                .join("")}
+            </div>
+            <select id="installmentRateSelect" class="select-sm" aria-label="Aylık vade farkı">
+              <option value="0" ${state.installment.monthlyRate === 0 ? "selected" : ""}>%0 (Peşin Fiyatına)</option>
+              <option value="2.5" ${state.installment.monthlyRate === 2.5 ? "selected" : ""}>%2,5 / ay vade</option>
+              <option value="3.5" ${state.installment.monthlyRate === 3.5 ? "selected" : ""}>%3,5 / ay vade</option>
+              <option value="4.5" ${state.installment.monthlyRate === 4.5 ? "selected" : ""}>%4,5 / ay vade</option>
+            </select>
+          </div>
+        </div>
+        <div class="installment-outputs" id="installmentOutputs">
+          <div class="inst-stat">
+            <div class="inst-stat-label">Aylık Ödeme (${state.installment.months === 1 ? "Tek Çekim" : `${state.installment.months} Ay`})</div>
+            <div class="inst-stat-value">${fmtTL(instCalc.monthly)}</div>
+          </div>
+          <div class="inst-stat">
+            <div class="inst-stat-label">Toplam Geri Ödeme</div>
+            <div class="inst-stat-value">${fmtTL(instCalc.total)}</div>
+          </div>
+          <div class="inst-stat">
+            <div class="inst-stat-label">Toplam Vade Farkı</div>
+            <div class="inst-stat-value" style="color:${instCalc.extra > 0 ? "var(--warn)" : "var(--good)"};">${instCalc.extra > 0 ? `+${fmtTL(instCalc.extra)}` : "0,00 TL (Vadesiz)"}</div>
+          </div>
+        </div>
+      </section>
+    `
+        : ""
+    }
+
     <!-- Full Multi-Store Comparison Table -->
     <section class="panel">
       <div class="panel-header">
@@ -610,12 +986,22 @@ function renderDetailView() {
           <input type="text" id="offerStoreFilter" class="input-sm" style="width:155px;" placeholder="Mağaza / satıcı ara..." value="${esc(state.offerFilters.storeSearch)}" />
           <label class="checkbox-pill">
             <input type="checkbox" id="filterFreeShipping" ${state.offerFilters.freeShippingOnly ? "checked" : ""} />
-            Sadece Ücretsiz Kargo
+            Ücretsiz Kargo
           </label>
           <label class="checkbox-pill">
             <input type="checkbox" id="filterHideOutliers" ${state.offerFilters.hideOutliers ? "checked" : ""} />
-            Fahiş Fiyatları Gizle
+            Fahişleri Gizle
           </label>
+          ${
+            stats?.suspiciousLowCount > 0
+              ? `
+            <label class="checkbox-pill">
+              <input type="checkbox" id="filterHideSuspicious" ${state.offerFilters.hideSuspicious ? "checked" : ""} />
+              Şüpheli Ucuzları Gizle (${stats.suspiciousLowCount})
+            </label>
+          `
+              : ""
+          }
           <select id="offerSortSelect" class="select-sm" aria-label="Teklif sıralaması">
             <option value="net_asc" ${state.offerSort === "net_asc" ? "selected" : ""}>Sırala: Kargo Dahil Net (Artan)</option>
             <option value="score_desc" ${state.offerSort === "score_desc" ? "selected" : ""}>Sırala: Fırsat Skoru (Yüksek)</option>
@@ -652,8 +1038,14 @@ function renderDetailView() {
       <section class="panel">
         <div class="panel-header">
           <div>
-            <h3>Fiyat Geçmişi Grafiği</h3>
-            <p class="muted-text">${hist ? `${hist.startDate} – ${hist.endDate} arası ${hist.dataPoints} günlük gerçek en düşük piyasa fiyatı` : "Tarihsel fiyat takibi"}</p>
+            <h3>${d.isPersonalHistory ? "Kişisel Fiyat Takip Grafiğiniz" : "Fiyat Geçmişi Grafiği"}</h3>
+            <p class="muted-text">${
+              hist
+                ? d.isPersonalHistory
+                  ? `${hist.dataPoints} kontrol kaydınızdan oluşturuldu (${hist.startDate} – ${hist.endDate})`
+                  : `${hist.startDate} – ${hist.endDate} arası ${hist.dataPoints} günlük gerçek en düşük piyasa fiyatı`
+                : "Bu ürünün bugünkü fiyatı kaydedildi — ürünü takibe alıp yeniden kontrol ettikçe kişisel grafiğiniz burada otomatik oluşacak."
+            }</p>
           </div>
           <div class="range-pills" id="chartRangePills">
             <button type="button" class="range-pill ${state.chartRange === "7" ? "active" : ""}" data-range="7">7G</button>
@@ -670,11 +1062,11 @@ function renderDetailView() {
             ? `
           <div class="chart-stats-strip">
             <div class="chart-stat-item">
-              <span class="chart-stat-label">30 Gün Ortalama</span>
+              <span class="chart-stat-label">${d.isPersonalHistory ? "Kayıt Ortalaması" : "30 Gün Ortalama"}</span>
               <span class="chart-stat-val">${fmtTL(hist.avg30)}</span>
             </div>
             <div class="chart-stat-item">
-              <span class="chart-stat-label">30 Günlük Değişim</span>
+              <span class="chart-stat-label">${d.isPersonalHistory ? "Toplam Değişim" : "30 Günlük Değişim"}</span>
               <span class="chart-stat-val ${hist.change30dPct > 0 ? "up" : hist.change30dPct < 0 ? "down" : ""}">${fmtPct(hist.change30dPct)}</span>
             </div>
             <div class="chart-stat-item">
@@ -704,15 +1096,15 @@ function renderDetailView() {
       </section>
     </div>
 
-    <!-- Variants (Colors / Capacities) -->
+    <!-- Variants (Colors / Capacities / Additional Store Links) -->
     ${
       d.variants?.length
         ? `
       <section class="panel">
         <div class="panel-header">
           <div>
-            <h3>Diğer Renk / Kapasite Seçenekleri</h3>
-            <p class="muted-text">Farklı bir renk veya kapasite daha avantajlı olabilir</p>
+            <h3>${d.url.startsWith("virtual:") ? "Diğer İlgili Mağaza Sayfaları" : "Diğer Renk / Kapasite Seçenekleri"}</h3>
+            <p class="muted-text">${d.url.startsWith("virtual:") ? "Doğrudan ilgili mağazanın katalog veya ürün sayfasını açın" : "Farklı bir renk veya kapasite daha avantajlı olabilir"}</p>
           </div>
         </div>
         <div class="variants-grid">
@@ -721,7 +1113,7 @@ function renderDetailView() {
               (v) => `
             <a class="variant-chip" ${v.isAkakceUrl ? `href="#" data-variant-url="${esc(v.url)}"` : `href="${esc(v.url || d.url)}" target="_blank" rel="noopener noreferrer"`}>
               <span class="variant-name">${esc(v.name)}</span>
-              <span class="variant-price">${v.price ? fmtTL(v.price) : "İncele"}</span>
+              <span class="variant-price">${v.price ? fmtTL(v.price) : "Mağazada Gör ↗"}</span>
               ${v.seller ? `<span class="muted-text" style="font-size:0.74rem;margin:0;">${esc(v.seller)}</span>` : ""}
             </a>`
             )
@@ -763,6 +1155,42 @@ function renderDetailView() {
   renderOffersTableBody();
   renderPriceChart($("priceChartMount"), d.history, state.chartRange);
 
+  // Bind Installment Calculator controls
+  const updateInstallmentUI = () => {
+    const out = $("installmentOutputs");
+    if (!out) return;
+    const calc = computeInstallment(instPrice, state.installment.months, state.installment.monthlyRate);
+    out.innerHTML = `
+      <div class="inst-stat">
+        <div class="inst-stat-label">Aylık Ödeme (${state.installment.months === 1 ? "Tek Çekim" : `${state.installment.months} Ay`})</div>
+        <div class="inst-stat-value">${fmtTL(calc.monthly)}</div>
+      </div>
+      <div class="inst-stat">
+        <div class="inst-stat-label">Toplam Geri Ödeme</div>
+        <div class="inst-stat-value">${fmtTL(calc.total)}</div>
+      </div>
+      <div class="inst-stat">
+        <div class="inst-stat-label">Toplam Vade Farkı</div>
+        <div class="inst-stat-value" style="color:${calc.extra > 0 ? "var(--warn)" : "var(--good)"};">${calc.extra > 0 ? `+${fmtTL(calc.extra)}` : "0,00 TL (Vadesiz)"}</div>
+      </div>
+    `;
+  };
+
+  $("installmentMonthPills")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-months]");
+    if (!btn) return;
+    state.installment.months = Number.parseInt(btn.dataset.months, 10) || 1;
+    $("installmentMonthPills")
+      .querySelectorAll(".inst-pill")
+      .forEach((b) => b.classList.toggle("active", b === btn));
+    updateInstallmentUI();
+  });
+
+  $("installmentRateSelect")?.addEventListener("change", (e) => {
+    state.installment.monthlyRate = Number.parseFloat(e.target.value) || 0;
+    updateInstallmentUI();
+  });
+
   // Bind detail-level controls
   $("offerStoreFilter")?.addEventListener("input", (e) => {
     state.offerFilters.storeSearch = e.target.value;
@@ -774,6 +1202,10 @@ function renderDetailView() {
   });
   $("filterHideOutliers")?.addEventListener("change", (e) => {
     state.offerFilters.hideOutliers = e.target.checked;
+    renderOffersTableBody();
+  });
+  $("filterHideSuspicious")?.addEventListener("change", (e) => {
+    state.offerFilters.hideSuspicious = e.target.checked;
     renderOffersTableBody();
   });
   $("offerSortSelect")?.addEventListener("change", (e) => {
@@ -905,6 +1337,9 @@ function renderOffersTableBody() {
   }
   if (state.offerFilters.hideOutliers) {
     list = list.filter((o) => !o.isOutlier);
+  }
+  if (state.offerFilters.hideSuspicious) {
+    list = list.filter((o) => !o.isSuspiciousLow);
   }
   if (q) {
     list = list.filter((o) =>
@@ -1142,7 +1577,10 @@ async function runSideBySideCompare() {
     const res = await apiFetch("/api/compare", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ urls: state.compareBasket.map((b) => b.url) }),
+      body: JSON.stringify({
+        urls: state.compareBasket.map((b) => b.url),
+        titles: state.compareBasket.map((b) => b.title || ""),
+      }),
     });
     setStatus(null);
     state.compareResult = res;
@@ -1186,7 +1624,7 @@ function renderCompareMatrix(data) {
               <td>
                 <div style="display:flex;flex-direction:column;gap:8px;min-width:190px;">
                   ${it.image ? `<img src="${esc(it.image)}" alt="${esc(it.title)}" style="height:82px;object-fit:contain;align-self:flex-start;" />` : ""}
-                  <strong style="cursor:pointer;color:var(--primary);" data-open-compared="${esc(it.url)}">${esc(it.title)}</strong>
+                  <strong style="cursor:pointer;color:var(--primary);" data-open-compared="${esc(it.url)}" data-open-compared-title="${esc(it.title)}">${esc(it.title)}</strong>
                 </div>
               </td>`
               )
@@ -1259,8 +1697,287 @@ function renderCompareMatrix(data) {
   `;
 
   els.compareResultContainer.querySelectorAll("[data-open-compared]").forEach((el) => {
-    el.addEventListener("click", () => openProductDetail(el.dataset.openCompared));
+    el.addEventListener("click", () =>
+      openProductDetail(el.dataset.openCompared, false, el.dataset.openComparedTitle || "")
+    );
   });
+}
+
+// ============================================================================
+// SHOPPING CART COST OPTIMIZER ("SEPET OPTİMİZATÖRÜ")
+// ============================================================================
+function toggleCartItem(product) {
+  if (!product?.url) return;
+  const idx = state.cart.findIndex((c) => c.url === product.url);
+  if (idx >= 0) {
+    state.cart.splice(idx, 1);
+    showToast("Ürün sepetten çıkarıldı.");
+  } else {
+    if (state.cart.length >= 12) {
+      showToast("Sepet optimizatörüne en fazla 12 farklı ürün ekleyebilirsiniz.");
+      return;
+    }
+    state.cart.push({
+      id: product.id || "",
+      title: product.title || "",
+      url: product.url,
+      image: product.image || "",
+      lowestPrice: product.stats?.minNet ?? product.lowestPrice ?? product.lowPrice ?? null,
+      quantity: 1,
+    });
+    showToast("Ürün sepet optimizatörüne eklendi.");
+  }
+  state.cartPlan = null;
+  saveLocalCart();
+
+  if (state.activeView === "search") renderSearchResults();
+  if (state.activeView === "detail") renderDetailView();
+  if (state.activeView === "cart") renderCartView();
+}
+
+function renderCartView() {
+  const items = state.cart;
+  if (els.optimizeCartBtn) els.optimizeCartBtn.hidden = items.length === 0;
+  if (els.clearCartBtn) els.clearCartBtn.hidden = items.length === 0;
+
+  if (!items.length) {
+    els.cartItemsContainer.innerHTML = `
+      <div class="empty-state">
+        <h3>Sepetiniz henüz boş</h3>
+        <p>Arama sonuçlarından veya ürün analiz ekranından <strong>"+ Sepet"</strong> butonuna dokunarak alacağınız ürünleri ekleyin; en ucuz <strong>tek mağaza</strong> veya <strong>karışık mağaza</strong> kombinasyonunu kargo dahil hesaplayalım.</p>
+      </div>`;
+    els.cartPlanContainer.innerHTML = "";
+    return;
+  }
+
+  const estTotal = items.reduce(
+    (sum, it) => sum + (typeof it.lowestPrice === "number" ? it.lowestPrice * (it.quantity || 1) : 0),
+    0
+  );
+
+  els.cartItemsContainer.innerHTML = `
+    <div class="list-stack">
+      ${items
+        .map(
+          (it, idx) => `
+        <div class="cart-item-card" data-cart-idx="${idx}">
+          <img class="watch-thumb" src="${esc(it.image || "")}" alt="${esc(it.title)}" />
+          <div>
+            <h3 class="watch-title" data-open-cart-item="${esc(it.url)}" data-cart-title="${esc(it.title)}">${esc(it.title)}</h3>
+            <div class="watch-metrics">
+              <span>Tahmini Birim: <strong class="mono">${it.lowestPrice ? fmtTL(it.lowestPrice) : "Hesaplanacak"}</strong></span>
+              ${it.lowestPrice ? `<span>Ara Toplam: <strong class="mono">${fmtTL(it.lowestPrice * (it.quantity || 1))}</strong></span>` : ""}
+            </div>
+          </div>
+          <div class="watch-actions">
+            <div class="qty-stepper" aria-label="Adet">
+              <button type="button" data-cart-dec="${idx}" aria-label="Azalt">&minus;</button>
+              <span>${it.quantity || 1}</span>
+              <button type="button" data-cart-inc="${idx}" aria-label="Artır">+</button>
+            </div>
+            <button type="button" class="btn btn-ghost btn-sm" data-cart-remove="${idx}">Sil</button>
+          </div>
+        </div>`
+        )
+        .join("")}
+    </div>
+    ${
+      estTotal > 0
+        ? `<div class="muted-text" style="margin-top:10px;text-align:right;">
+            Sepet tahmini ön toplam (${items.reduce((s, i) => s + (i.quantity || 1), 0)} adet): <strong class="mono">${fmtTL(estTotal)}</strong>
+          </div>`
+        : ""
+    }
+  `;
+
+  if (state.cartPlan) {
+    renderCartPlan(state.cartPlan);
+  } else {
+    els.cartPlanContainer.innerHTML = `
+      <div class="empty-state" style="margin-top:16px;">
+        <p style="margin:0;">Yukarıdaki <strong>"Maliyeti Optimize Et"</strong> butonuna tıklayarak tüm mağazaların kargo barajlarını ve tek mağaza / karışık sepet farkını canlı hesaplayın.</p>
+      </div>`;
+  }
+}
+
+async function runCartOptimize() {
+  if (!state.cart.length) return;
+  els.optimizeCartBtn.disabled = true;
+  setStatus("loading", `${state.cart.length} ürün için tüm mağaza teklifleri ve kargo barajları optimize ediliyor...`);
+  try {
+    const plan = await apiFetch("/api/cart/optimize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        items: state.cart.map((c) => ({
+          id: c.id,
+          title: c.title,
+          url: c.url,
+          image: c.image,
+          quantity: c.quantity || 1,
+        })),
+      }),
+    });
+    setStatus(null);
+    state.cartPlan = plan;
+    renderCartPlan(plan);
+  } catch (err) {
+    setStatus("error", err.message);
+  } finally {
+    els.optimizeCartBtn.disabled = false;
+  }
+}
+
+function renderCartPlan(plan) {
+  if (!plan || !plan.itemCount || !plan.splitStrategy) {
+    els.cartPlanContainer.innerHTML = `
+      <div class="empty-state" style="margin-top:16px;">
+        <h3>Optimizasyon için yeterli fiyatlı teklif bulunamadı</h3>
+        <p>Sepetteki ürünlerin canlı mağaza teklifleri alınamadı. Ayarlar'dan Serper API anahtarınızı kontrol edip tekrar deneyebilirsiniz.</p>
+      </div>`;
+    return;
+  }
+
+  const rec = plan.recommendation || {};
+  const split = plan.splitStrategy;
+  const singles = plan.singleStoreOptions || [];
+  const bestSingle = singles.find((s) => s.coversAll) || singles[0] || null;
+  const splitWins = rec.winner === "split";
+
+  els.cartPlanContainer.innerHTML = `
+    <div class="optimizer-verdict">
+      <h3>✓ ${esc(rec.headline || "Sepet Optimizasyon Sonucu")}</h3>
+      <p>${esc(rec.detail || "")}</p>
+    </div>
+
+    <div class="strategy-grid">
+      <!-- Strategy A: Split-Store -->
+      <section class="strategy-card ${splitWins ? "winner" : ""}">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <span class="pick-badge ${splitWins ? "cheapest" : "balanced"}">Karışık Mağaza (${split.storeCount} Mağaza)</span>
+          ${splitWins ? `<span class="mini-badge cheapest">★ En Avantajlı</span>` : ""}
+        </div>
+        <div class="strategy-total">${fmtTL(split.total)}</div>
+        <div class="muted-text" style="margin:0;font-size:0.82rem;">
+          Ürünler: <strong class="mono">${fmtTL(split.subtotal)}</strong> · Kargo: <strong class="mono">${split.shipping === 0 ? "Ücretsiz" : fmtTL(split.shipping)}</strong>
+        </div>
+
+        <div class="strategy-list">
+          ${split.assignments
+            .map(
+              (a) => `
+            <div class="strategy-line">
+              <div style="min-width:0;">
+                <div style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(a.title)}">
+                  ${a.quantity > 1 ? `${a.quantity}x ` : ""}${esc(a.title)}
+                </div>
+                <div class="muted-text" style="margin:0;font-size:0.75rem;">
+                  ${esc(a.store)} · ${a.isFreeShipping ? "Ücretsiz kargo" : `+${fmtTL(a.unitShipping)} kargo`}
+                </div>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
+                <strong class="mono">${fmtTL(a.lineBasePrice)}</strong>
+                ${a.url ? `<a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-sm">Git ↗</a>` : ""}
+              </div>
+            </div>`
+            )
+            .join("")}
+        </div>
+      </section>
+
+      <!-- Strategy B: Single-Store Consolidation -->
+      <section class="strategy-card ${!splitWins && bestSingle?.coversAll ? "winner" : ""}">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+          <span class="pick-badge ${!splitWins && bestSingle?.coversAll ? "cheapest" : "fast"}">Tek Mağaza Seçenekleri</span>
+          ${!splitWins && bestSingle?.coversAll ? `<span class="mini-badge cheapest">★ En Avantajlı</span>` : ""}
+        </div>
+
+        ${
+          singles.length
+            ? `
+          <div class="strategy-total">${bestSingle ? fmtTL(bestSingle.total) : "-"}</div>
+          <div class="muted-text" style="margin:0;font-size:0.82rem;">
+            ${
+              bestSingle
+                ? `${esc(bestSingle.platform)} (${bestSingle.matchedCount}/${bestSingle.totalItems} ürün) · Kargo: <strong class="mono">${bestSingle.shipping === 0 ? "Ücretsiz" : fmtTL(bestSingle.shipping)}</strong>`
+                : ""
+            }
+          </div>
+          <div class="strategy-list">
+            ${singles
+              .map(
+                (s) => `
+              <div class="strategy-line">
+                <div style="min-width:0;">
+                  <div style="font-weight:700;">
+                    ${esc(s.platform)}
+                    <span class="offer-pill" style="margin-left:4px;">${s.matchedCount}/${s.totalItems} ürün</span>
+                  </div>
+                  <div class="muted-text" style="margin:0;font-size:0.75rem;">
+                    Kargo: ${s.shipping === 0 ? "Ücretsiz (baraj aşıldı / dahil)" : fmtTL(s.shipping)}
+                    ${s.missing?.length ? ` · Eksik: ${esc(s.missing.slice(0, 2).join(", "))}` : ""}
+                  </div>
+                </div>
+                <div style="text-align:right;flex-shrink:0;">
+                  <strong class="mono">${fmtTL(s.total)}</strong>
+                  ${
+                    typeof s.diffVsSplit === "number"
+                      ? `<div class="muted-text" style="margin:0;font-size:0.74rem;color:${s.diffVsSplit <= 0 ? "var(--good)" : "var(--warn)"};">
+                          ${s.diffVsSplit <= 0 ? `${fmtTL(Math.abs(s.diffVsSplit))} kâr` : `+${fmtTL(s.diffVsSplit)} fark`}
+                        </div>`
+                      : ""
+                  }
+                </div>
+              </div>`
+              )
+              .join("")}
+          </div>
+        `
+            : `<p class="muted-text" style="margin:8px 0 0;">Sepetteki birden fazla ürünü aynı anda satan ortak bir mağaza bulunamadı; her ürünü soldaki en ucuz mağazasından almak en iyi stratejidir.</p>`
+        }
+      </section>
+    </div>
+  `;
+}
+
+// ============================================================================
+// CAMERA BARCODE SCANNER (iPhone Safari & Desktop Compatible)
+// ============================================================================
+function openScannerModal() {
+  if (!els.scannerModal) return;
+  els.scannerModal.hidden = false;
+  if (els.manualBarcodeInput) els.manualBarcodeInput.value = "";
+  startScanner(els.scannerVideo, els.scannerStatus, (code) => {
+    closeScannerModal();
+    lookupBarcode(code);
+  });
+}
+
+function closeScannerModal() {
+  stopScanner();
+  if (els.scannerModal) els.scannerModal.hidden = true;
+}
+
+async function lookupBarcode(rawCode) {
+  const code = String(rawCode || "").replace(/\D+/g, "").trim();
+  if (code.length < 8 || code.length > 14) {
+    showToast("Barkod 8 ile 14 haneli rakam olmalıdır.");
+    return;
+  }
+
+  setStatus("loading", `Barkod (${code}) veritabanlarında çözümleniyor...`);
+  try {
+    const resolved = await apiFetch(`/api/barcode/${encodeURIComponent(code)}`);
+    const query = resolved.query || code;
+    showToast(
+      resolved.query && resolved.query !== code
+        ? `Barkod çözüldü (${resolved.source}): ${query}`
+        : `Barkod (${code}) doğrudan aranıyor...`
+    );
+    await performSearch(query, { fromBarcode: true });
+  } catch (err) {
+    setStatus("error", err.message);
+  }
 }
 
 // ============================================================================
@@ -1323,7 +2040,7 @@ function renderWatchlistView() {
         <div class="watch-card ${w.targetReached ? "target-hit" : ""}" data-watch-id="${esc(w.id)}">
           <img class="watch-thumb" src="${esc(w.image || "")}" alt="${esc(w.title)}" />
           <div>
-            <h3 class="watch-title" data-open-watch="${esc(w.url)}">${esc(w.title)}</h3>
+            <h3 class="watch-title" data-open-watch="${esc(w.url)}" data-watch-title="${esc(w.title)}">${esc(w.title)}</h3>
             <div class="watch-metrics">
               <span>Güncel Net: <strong class="mono">${fmtTL(w.last_net_price)}</strong></span>
               ${w.target_price ? `<span>Hedef: <strong class="mono">${fmtTL(w.target_price)}</strong></span>` : ""}
@@ -1336,7 +2053,7 @@ function renderWatchlistView() {
           <div class="watch-actions">
             <input type="number" class="input-sm" data-target-input="${esc(w.id)}" value="${w.target_price ?? ""}" placeholder="Hedef TL" />
             <button type="button" class="btn btn-secondary btn-sm" data-save-target="${esc(w.id)}">Hedef Kaydet</button>
-            <button type="button" class="btn btn-primary btn-sm" data-open-watch="${esc(w.url)}">Analiz</button>
+            <button type="button" class="btn btn-primary btn-sm" data-open-watch="${esc(w.url)}" data-watch-title="${esc(w.title)}">Analiz</button>
             <button type="button" class="btn btn-ghost btn-sm" data-delete-watch="${esc(w.id)}">Sil</button>
           </div>
         </div>`
@@ -1476,6 +2193,34 @@ function bindEvents() {
     if (state.lastQuery) performSearch(state.lastQuery);
   });
 
+  // Quick store / accessory / free-shipping filter chips
+  els.quickFilterBar?.addEventListener("click", (e) => {
+    const qfBtn = e.target.closest("[data-qfilter]");
+    if (qfBtn) {
+      const key = qfBtn.dataset.qfilter;
+      if (key === "reset") {
+        state.searchFilters = {
+          hideAccessories: false,
+          pricedOnly: false,
+          officialOnly: false,
+          freeShippingOnly: false,
+          store: "",
+        };
+      } else if (key in state.searchFilters) {
+        state.searchFilters[key] = !state.searchFilters[key];
+      }
+      renderSearchResults();
+      return;
+    }
+
+    const storeBtn = e.target.closest("[data-qstore]");
+    if (storeBtn) {
+      const chosen = storeBtn.dataset.qstore;
+      state.searchFilters.store = state.searchFilters.store === chosen ? "" : chosen;
+      renderSearchResults();
+    }
+  });
+
   // Results grid click delegation
   els.resultsGrid.addEventListener("click", (e) => {
     const card = e.target.closest(".product-card");
@@ -1488,15 +2233,21 @@ function bindEvents() {
     if (!actionEl) return;
     const action = actionEl.dataset.action;
     if (action === "open-detail") {
-      openProductDetail(product.url);
+      openProductDetail(product.url, false, product.title);
     } else if (action === "toggle-compare") {
       toggleCompareItem(product);
+    } else if (action === "toggle-cart") {
+      toggleCartItem(product);
     }
   });
 
   // Detail top-bar buttons
   els.backToResultsBtn.addEventListener("click", () => {
     switchView("search");
+  });
+
+  els.detailCartToggleBtn?.addEventListener("click", () => {
+    if (state.currentDetail) toggleCartItem(state.currentDetail);
   });
 
   els.detailShareBtn?.addEventListener("click", async () => {
@@ -1533,13 +2284,38 @@ function bindEvents() {
   });
 
   els.detailRefreshBtn.addEventListener("click", () => {
-    if (state.currentDetail) openProductDetail(state.currentDetail.url, true);
+    if (state.currentDetail) openProductDetail(state.currentDetail.url, true, state.currentDetail.title);
   });
 
-  els.exportCsvBtn.addEventListener("click", () => {
-    if (!state.currentDetail) return;
-    window.location.href = `/api/export/csv?url=${encodeURIComponent(state.currentDetail.url)}`;
-    showToast("CSV (Excel uyumlu) raporu indiriliyor...");
+  els.exportCsvBtn.addEventListener("click", async () => {
+    const d = state.currentDetail;
+    if (!d) return;
+    showToast("CSV (Excel uyumlu) raporu hazırlanıyor...");
+    try {
+      const { serperKey, serpApiKey } = getStoredApiKeys();
+      const headers = new Headers();
+      if (serperKey) headers.set("X-Serper-Key", serperKey);
+      if (serpApiKey) headers.set("X-SerpApi-Key", serpApiKey);
+
+      const params = new URLSearchParams({ url: d.url });
+      if (d.title) params.set("title", d.title);
+
+      const res = await fetch(`/api/export/csv?${params.toString()}`, { headers });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `CSV oluşturulamadı (HTTP ${res.status})`);
+      }
+      const blob = await res.blob();
+      const dlUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = dlUrl;
+      a.download = `fiyatradar-${(d.id || "rapor").replace(/[^a-zA-Z0-9_-]/g, "")}.csv`;
+      a.click();
+      URL.revokeObjectURL(dlUrl);
+      showToast("CSV (Excel uyumlu) raporu indirildi.");
+    } catch (err) {
+      showToast(`Hata: ${err.message}`);
+    }
   });
 
   els.exportJsonBtn.addEventListener("click", () => {
@@ -1556,6 +2332,75 @@ function bindEvents() {
   });
 
   els.printReportBtn.addEventListener("click", () => window.print());
+
+  // Barcode Scanner Modal handlers
+  els.openScannerBtn?.addEventListener("click", openScannerModal);
+  els.closeScannerBtn?.addEventListener("click", closeScannerModal);
+  els.scannerModal?.addEventListener("click", (e) => {
+    if (e.target === els.scannerModal) closeScannerModal();
+  });
+  els.manualBarcodeForm?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const raw = (els.manualBarcodeInput?.value || "").trim();
+    if (!raw) return;
+    closeScannerModal();
+    lookupBarcode(raw);
+  });
+
+  // Shopping Cart Cost Optimizer actions
+  els.cartItemsContainer?.addEventListener("click", (e) => {
+    const openEl = e.target.closest("[data-open-cart-item]");
+    if (openEl) {
+      openProductDetail(openEl.dataset.openCartItem, false, openEl.dataset.cartTitle || "");
+      return;
+    }
+
+    const decBtn = e.target.closest("[data-cart-dec]");
+    if (decBtn) {
+      const idx = Number.parseInt(decBtn.dataset.cartDec, 10);
+      if (state.cart[idx]) {
+        state.cart[idx].quantity = Math.max(1, (state.cart[idx].quantity || 1) - 1);
+        state.cartPlan = null;
+        saveLocalCart();
+        renderCartView();
+      }
+      return;
+    }
+
+    const incBtn = e.target.closest("[data-cart-inc]");
+    if (incBtn) {
+      const idx = Number.parseInt(incBtn.dataset.cartInc, 10);
+      if (state.cart[idx]) {
+        state.cart[idx].quantity = Math.min(20, (state.cart[idx].quantity || 1) + 1);
+        state.cartPlan = null;
+        saveLocalCart();
+        renderCartView();
+      }
+      return;
+    }
+
+    const remBtn = e.target.closest("[data-cart-remove]");
+    if (remBtn) {
+      const idx = Number.parseInt(remBtn.dataset.cartRemove, 10);
+      if (idx >= 0 && idx < state.cart.length) {
+        state.cart.splice(idx, 1);
+        state.cartPlan = null;
+        saveLocalCart();
+        renderCartView();
+        showToast("Ürün sepetten çıkarıldı.");
+      }
+    }
+  });
+
+  els.optimizeCartBtn?.addEventListener("click", () => runCartOptimize());
+
+  els.clearCartBtn?.addEventListener("click", () => {
+    state.cart = [];
+    state.cartPlan = null;
+    saveLocalCart();
+    renderCartView();
+    showToast("Sepet temizlendi.");
+  });
 
   // Compare view buttons
   els.compareBasketBar.addEventListener("click", (e) => {
@@ -1589,7 +2434,7 @@ function bindEvents() {
   els.watchlistContainer.addEventListener("click", async (e) => {
     const openEl = e.target.closest("[data-open-watch]");
     if (openEl) {
-      openProductDetail(openEl.dataset.openWatch);
+      openProductDetail(openEl.dataset.openWatch, false, openEl.dataset.watchTitle || "");
       return;
     }
 
@@ -1637,6 +2482,12 @@ function bindEvents() {
       const res = await apiFetch("/api/watchlist/refresh", { method: "POST" });
       state.watchlist = res.items || [];
       saveLocalWatchlist(state.watchlist);
+      // Record refreshed live prices into iPhone's personal price history snapshots
+      for (const w of state.watchlist) {
+        if (w.url && typeof w.last_net_price === "number" && w.last_net_price > 0) {
+          recordLocalSnapshot(w.url, w.last_net_price);
+        }
+      }
       setStatus(null);
       renderWatchlistView();
       const hits = state.watchlist.filter((w) => w.targetReached).length;
@@ -1682,6 +2533,14 @@ function bindEvents() {
     if (e.target === els.settingsModal) closeSettingsModal();
   });
 
+  // Escape key closes open modals cleanly
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      if (els.scannerModal && !els.scannerModal.hidden) closeScannerModal();
+      if (els.settingsModal && !els.settingsModal.hidden) closeSettingsModal();
+    }
+  });
+
   els.settingsForm?.addEventListener("submit", (e) => {
     e.preventDefault();
     const serper = (els.serperKeyInput?.value || "").trim();
@@ -1696,7 +2555,7 @@ function bindEvents() {
     }
     updateApiStatusDot();
     closeSettingsModal();
-    showToast(serper || serpApi ? "Google Shopping TR (50+ Mağaza) aktif edildi!" : "API anahtarları temizlendi.");
+    showToast(serper || serpApi ? "Google Türkiye (70+ Mağaza) aktif edildi!" : "API anahtarları temizlendi.");
     if (state.lastQuery) performSearch(state.lastQuery, { refresh: true });
   });
 
@@ -1781,6 +2640,7 @@ function initPwa() {
 bindEvents();
 initPwa();
 updateCompareBadges();
+updateCartBadges();
 updateApiStatusDot();
 apiFetch("/api/providers")
   .then((p) => updateApiStatusDot(Boolean(p.googleShoppingReady)))

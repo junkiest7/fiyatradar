@@ -76,9 +76,16 @@ export function analyzeOffers(rawOffers, unitInfo = null) {
   const variance = netPrices.reduce((s, v) => s + (v - meanNet) ** 2, 0) / netPrices.length;
   const stdDev = round2(Math.sqrt(variance));
 
-  // Outlier threshold: Tukey upper fence OR >35% above both market median and cheapest net price
+  // Outlier thresholds:
+  // - Upper outlier: Tukey upper fence OR >35% above both market median and cheapest net price
+  // - Suspiciously-low anomaly: <35% of market median when >= 4 offers (catches cases, accessories, imitations)
   const tukeyFence = q3 + 1.5 * iqr;
   const relativeFence = Math.max(medianNet * 1.35, minNet * 1.35);
+  const suspiciousLowThreshold = valid.length >= 4 ? medianNet * 0.35 : 0;
+
+  // Compute verified minNet excluding suspiciously-low anomalies (falls back to global minNet if none)
+  const nonSuspicious = valid.filter((o) => o.netPrice >= suspiciousLowThreshold);
+  const verifiedMinNet = nonSuspicious.length ? nonSuspicious[0].netPrice : minNet;
 
   // Detect shipping traps: offer A has strictly lower basePrice than offer B,
   // yet offer A's netPrice is strictly higher than offer B's netPrice!
@@ -87,9 +94,13 @@ export function analyzeOffers(rawOffers, unitInfo = null) {
 
   for (let i = 0; i < valid.length; i++) {
     const a = valid[i];
-    if (a.shippingCost <= 0) continue;
+    if (a.shippingCost <= 0 || a.netPrice < suspiciousLowThreshold) continue;
     const betterFree = valid.find(
-      (b) => b !== a && b.basePrice >= a.basePrice && b.netPrice < a.netPrice
+      (b) =>
+        b !== a &&
+        b.netPrice >= suspiciousLowThreshold &&
+        b.basePrice >= a.basePrice &&
+        b.netPrice < a.netPrice
     );
     if (betterFree) {
       trapIds.add(a.id);
@@ -110,24 +121,27 @@ export function analyzeOffers(rawOffers, unitInfo = null) {
 
   // Score each offer (0 - 100)
   const scoredOffers = valid.map((o, idx) => {
-    const diffFromMin = round2(o.netPrice - minNet);
-    const diffFromMinPct = minNet > 0 ? round2((diffFromMin / minNet) * 100) : 0;
+    const isSuspiciousLow = suspiciousLowThreshold > 0 && o.netPrice < suspiciousLowThreshold;
+    const refMin = verifiedMinNet;
+    const diffFromMin = round2(o.netPrice - refMin);
+    const diffFromMinPct = refMin > 0 ? round2((diffFromMin / refMin) * 100) : 0;
     const diffFromMedianPct = medianNet > 0 ? round2(((o.netPrice - medianNet) / medianNet) * 100) : 0;
     const isOutlier =
       valid.length >= 3 &&
       (o.netPrice > tukeyFence || o.netPrice > relativeFence);
     const isShippingTrap = trapIds.has(o.id);
 
-    // 1. Price score (0-55 pts): exponential decay as % above cheapest rises
-    // 0% above min => 55 pts, 2% => ~49.8 pts, 5% => ~42.8 pts, 15% => ~26 pts, 50% => ~4.5 pts
-    const priceScore = 55 * Math.exp(-0.05 * diffFromMinPct);
+    // 1. Price score (0-55 pts): exponential decay as % above verified cheapest rises
+    const priceScore = isSuspiciousLow
+      ? 12
+      : 55 * Math.exp(-0.05 * Math.max(0, diffFromMinPct));
 
     // 2. Store reliability & official seller (0-20 pts)
     const trustNorm = Math.max(0.5, Math.min(1.0, o.store?.trustScore || 0.72));
     const trustPoints = ((trustNorm - 0.5) / 0.5) * 20;
 
     // 3. Free shipping advantage (0-12 pts)
-    const shippingPoints = o.shipping?.isFree ? 12 : o.shipping?.unknown ? 5 : Math.max(0, 8 - (o.shippingCost / Math.max(100, minNet * 0.02)) * 8);
+    const shippingPoints = o.shipping?.isFree ? 12 : o.shipping?.unknown ? 5 : Math.max(0, 8 - (o.shippingCost / Math.max(100, refMin * 0.02)) * 8);
 
     // 4. Delivery & stock signal (0-13 pts)
     const deliveryPoints = (o.delivery?.score || 0.55) * 9 + (o.inStock ? 4 : 0);
@@ -141,17 +155,20 @@ export function analyzeOffers(rawOffers, unitInfo = null) {
       diffFromMinPct,
       diffFromMedianPct,
       isOutlier,
+      isSuspiciousLow,
       isShippingTrap,
       dealScore,
       badges: [],
     };
   });
 
-  // Top picks
-  const cheapestNet = scoredOffers[0];
-  const bestValue = [...scoredOffers].sort((a, b) => b.dealScore - a.dealScore || a.netPrice - b.netPrice)[0];
-  const competitivePool = scoredOffers.filter((o) => o.diffFromMinPct <= 6);
-  const fastestCompetitive = [...(competitivePool.length ? competitivePool : scoredOffers)].sort(
+  // Top picks (prefer authentic non-suspicious offers!)
+  const authenticPool = scoredOffers.filter((o) => !o.isSuspiciousLow);
+  const pickBase = authenticPool.length ? authenticPool : scoredOffers;
+  const cheapestNet = pickBase[0];
+  const bestValue = [...pickBase].sort((a, b) => b.dealScore - a.dealScore || a.netPrice - b.netPrice)[0];
+  const competitivePool = pickBase.filter((o) => o.diffFromMinPct <= 6);
+  const fastestCompetitive = [...(competitivePool.length ? competitivePool : pickBase)].sort(
     (a, b) => (a.delivery?.days ?? 5) - (b.delivery?.days ?? 5) || a.netPrice - b.netPrice
   )[0];
 
@@ -163,11 +180,12 @@ export function analyzeOffers(rawOffers, unitInfo = null) {
   for (const o of scoredOffers) {
     if (o.isShippingTrap) o.badges.push({ type: "trap", label: "Kargo Tuzağı" });
     if (o.isOutlier) o.badges.push({ type: "outlier", label: "Piyasa Üstü Fiyat" });
+    if (o.isSuspiciousLow) o.badges.push({ type: "trap", label: "⚠ Şüpheli Ucuz / Muadil" });
   }
 
   // Platform breakdown
   const platMap = new Map();
-  for (const o of scoredOffers) {
+  for (const o of pickBase) {
     const plat = o.store?.platform || "Diğer";
     if (!platMap.has(plat)) {
       platMap.set(plat, {
@@ -197,20 +215,22 @@ export function analyzeOffers(rawOffers, unitInfo = null) {
     .map((p) => ({
       ...p,
       avgNet: round2(p.sumNet / p.count),
-      diffFromGlobalMinPct: minNet > 0 ? round2(((p.minNet - minNet) / minNet) * 100) : 0,
+      diffFromGlobalMinPct: verifiedMinNet > 0 ? round2(((p.minNet - verifiedMinNet) / verifiedMinNet) * 100) : 0,
     }))
     .sort((a, b) => a.minNet - b.minNet);
 
   const nonOutliers = scoredOffers.filter((o) => !o.isOutlier);
-  const marketSpreadPct = minNet > 0 ? round2(((maxNet - minNet) / minNet) * 100) : 0;
-  const savingsVsMedian = round2(Math.max(0, medianNet - minNet));
+  const suspiciousLowCount = scoredOffers.filter((o) => o.isSuspiciousLow).length;
+  const marketSpreadPct = verifiedMinNet > 0 ? round2(((maxNet - verifiedMinNet) / verifiedMinNet) * 100) : 0;
+  const savingsVsMedian = round2(Math.max(0, medianNet - verifiedMinNet));
   const savingsVsMedianPct = medianNet > 0 ? round2((savingsVsMedian / medianNet) * 100) : 0;
 
   return {
     offers: scoredOffers,
     stats: {
       offerCountAnalyzed: scoredOffers.length,
-      minNet,
+      minNet: verifiedMinNet,
+      rawMinNet: minNet,
       maxNet,
       meanNet,
       medianNet,
@@ -224,6 +244,7 @@ export function analyzeOffers(rawOffers, unitInfo = null) {
       freeShippingCount: scoredOffers.filter((o) => o.shipping?.isFree).length,
       inStockCount: scoredOffers.filter((o) => o.inStock).length,
       outlierCount: scoredOffers.length - nonOutliers.length,
+      suspiciousLowCount,
       bestUnitPrice: cheapestNet?.unitPrice ?? null,
     },
     picks: {

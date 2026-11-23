@@ -149,6 +149,32 @@ export function recordSnapshot(productId, netPrice, bestStore, offerCount) {
   saveJson();
 }
 
+export function getPriceSnapshots(productId, limit = 90) {
+  if (!productId) return [];
+  const key = String(productId);
+  if (db) {
+    return db
+      .prepare(
+        `SELECT net_price, best_store, offer_count, captured_at
+         FROM price_snapshots WHERE product_id = ? ORDER BY captured_at ASC LIMIT ?`
+      )
+      .all(key, limit);
+  }
+  return jsonState.price_snapshots
+    .filter((s) => s.product_id === key)
+    .slice(-limit);
+}
+
+export function getWatchlistItemByUrl(url) {
+  if (!url) return null;
+  if (db) {
+    const row = db.prepare("SELECT * FROM watchlist WHERE url = ?").get(String(url));
+    return row ? decorateWatchRow(row) : null;
+  }
+  const row = jsonState.watchlist.find((w) => w.url === String(url));
+  return row ? decorateWatchRow(row) : null;
+}
+
 export function getWatchlist() {
   if (db) {
     return db

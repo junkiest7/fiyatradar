@@ -12,10 +12,12 @@
 
 import {
   extractUnitInfo,
+  isAccessoryTitle,
   parseDeliverySpeed,
   parseShipping,
   parseStoreInfo,
   parseTrPrice,
+  transliterateTr,
 } from "./parsers.js";
 import { analyzeOffers, analyzePriceHistory } from "./analyzer.js";
 
@@ -285,11 +287,32 @@ export function extractOrganicPriceInfo(item) {
   return { price: null, shipping, source: "none" };
 }
 
+// Image enrichment cache (15 min TTL)
+const imageCache = new Map();
+
+function getCachedImages(qKey) {
+  const entry = imageCache.get(qKey);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    imageCache.delete(qKey);
+    return null;
+  }
+  return entry.images;
+}
+
+function setCachedImages(qKey, images) {
+  if (imageCache.size > 150) {
+    imageCache.delete(imageCache.keys().next().value);
+  }
+  imageCache.set(qKey, { images, expiresAt: Date.now() + 15 * 60 * 1000 });
+}
+
 /**
- * Provider 1: Serper.dev Google Türkiye Search Engine
- * Uses /search (gl: "tr", hl: "tr") because Google Shopping (/shopping) is disabled in Turkey!
- * Automatically extracts live prices, shipping, ratings, images, and store links across
- * Trendyol, Hepsiburada, Amazon TR, Stradivarius, Zara, Boyner, n11, Akakçe, Cimri, MediaMarkt, etc.
+ * Provider 1: Serper.dev Google Türkiye Search Engine (v2)
+ * - Uses num: 10 (Google's post-2025 reliable page size — prevents intermittent empty SERP pages!)
+ * - Automatic retry with clean query & ASCII-transliterated Turkish fallback (fixes "gucci güneş gözlüğü" -> 0 bug)
+ * - Automatic real product photo enrichment via Serper /images when organic cards lack photos
+ * - Accessory tagging so cases/straps don't distort price medians
  */
 export async function searchSerperTurkey(query, apiKey) {
   const callSerper = async (endpoint, body) => {
@@ -313,43 +336,100 @@ export async function searchSerperTurkey(query, apiKey) {
     return res.json();
   };
 
-  // Query 1: Broad Turkish price search (captures official brand stores like Stradivarius, Zara, Apple + Trendyol/Hepsiburada/Akakce/Cimri)
-  const qWithPrice = /fiyat|tl\b/i.test(query) ? query : `${query} fiyat TL`;
-  const data1 = await callSerper("search", {
-    q: qWithPrice,
+  // Query 1: Clean Turkish price query with reliable num: 10 (no over-constraining literal "TL")
+  const q1 = /fiyat|tl\b/i.test(query) ? query : `${query} fiyat`;
+  let data1 = await callSerper("search", {
+    q: q1,
     gl: "tr",
     hl: "tr",
-    num: 20,
+    num: 10,
   });
 
-  const organic1 = Array.isArray(data1.organic) ? data1.organic : [];
-  let combinedOrganic = [...organic1];
+  let organic1 = Array.isArray(data1.organic) ? data1.organic : [];
 
-  // Count how many priced items we got from call 1
-  const pricedCount1 = organic1.filter((it) => !isNonShoppingUrl(it.link) && extractOrganicPriceInfo(it).price !== null).length;
-
-  // Query 2 (only if < 5 priced results from query 1): targeted major TR marketplaces & price comparators
-  if (pricedCount1 < 5) {
+  // Retry A: If Google returned an intermittent empty SERP, retry with clean query
+  if (organic1.length === 0) {
     try {
-      const data2 = await callSerper("search", {
-        q: `${query} fiyat (site:trendyol.com OR site:hepsiburada.com OR site:amazon.com.tr OR site:n11.com OR site:akakce.com OR site:cimri.com OR site:mediamarkt.com.tr OR site:teknosa.com OR site:pazarama.com)`,
+      const retryA = await callSerper("search", { q: query, gl: "tr", hl: "tr", num: 10 });
+      if (Array.isArray(retryA.organic) && retryA.organic.length > 0) {
+        data1 = retryA;
+        organic1 = retryA.organic;
+      }
+    } catch {
+      // Continue to Retry B
+    }
+  }
+
+  // Retry B: If still empty and query has Turkish diacritics, retry with ASCII-normalized query
+  const asciiQuery = transliterateTr(query);
+  if (organic1.length === 0 && asciiQuery.toLowerCase() !== query.toLowerCase()) {
+    try {
+      const retryB = await callSerper("search", {
+        q: `${asciiQuery} fiyat`,
         gl: "tr",
         hl: "tr",
-        num: 15,
+        num: 10,
+      });
+      if (Array.isArray(retryB.organic) && retryB.organic.length > 0) {
+        data1 = retryB;
+        organic1 = retryB.organic;
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  let combinedOrganic = [...organic1];
+
+  // Count how many non-accessory priced items came back from Query 1
+  const pricedCount1 = organic1.filter(
+    (it) =>
+      !isNonShoppingUrl(it.link) &&
+      !isAccessoryTitle(it.title, query) &&
+      extractOrganicPriceInfo(it).price !== null
+  ).length;
+
+  // Query 2 (when < 5 priced items): targeted major Turkish marketplaces & comparators
+  if (pricedCount1 < 5) {
+    try {
+      const qTarget = asciiQuery !== query && organic1.length === 0 ? asciiQuery : query;
+      const data2 = await callSerper("search", {
+        q: `${qTarget} fiyat (site:trendyol.com OR site:hepsiburada.com OR site:amazon.com.tr OR site:n11.com OR site:akakce.com OR site:cimri.com OR site:mediamarkt.com.tr OR site:teknosa.com OR site:boyner.com.tr)`,
+        gl: "tr",
+        hl: "tr",
+        num: 10,
       });
       if (Array.isArray(data2.organic)) {
         combinedOrganic.push(...data2.organic);
       }
     } catch {
-      // Non-fatal; keep query 1 results
+      // Non-fatal
     }
   }
 
-  // Optional: If Serper also returned inline shopping results or images, capture them too!
-  const inlineImages = Array.isArray(data1.images) ? data1.images : [];
-  const defaultProductImage = inlineImages[0]?.imageUrl || "";
+  // Enrich with real high-res product images when organic items lack imageUrl
+  let imagePool = Array.isArray(data1.images) ? data1.images : [];
+  const missingPhotos = combinedOrganic.filter((it) => !it?.imageUrl && !it?.thumbnailUrl).length;
+  if (combinedOrganic.length > 0 && missingPhotos >= Math.ceil(combinedOrganic.length * 0.5)) {
+    const imgKey = query.toLocaleLowerCase("tr-TR");
+    const cachedImgs = getCachedImages(imgKey);
+    if (cachedImgs) {
+      imagePool = cachedImgs;
+    } else {
+      try {
+        const imgData = await callSerper("images", { q: query, gl: "tr", hl: "tr", num: 10 });
+        const imgs = Array.isArray(imgData.images) ? imgData.images : [];
+        if (imgs.length) {
+          imagePool = imgs;
+          setCachedImages(imgKey, imgs);
+        }
+      } catch {
+        // Non-fatal
+      }
+    }
+  }
 
-  return buildTurkeySearchResponse(query, combinedOrganic, defaultProductImage, "Google Türkiye (Serper)", "serper");
+  return buildTurkeySearchResponse(query, combinedOrganic, imagePool, "Google Türkiye (Serper)", "serper");
 }
 
 /**
@@ -385,8 +465,8 @@ export async function testSerperKey(apiKey) {
  * Provider 2: SerpAPI Google Türkiye Search
  */
 export async function searchSerpApiTurkey(query, apiKey) {
-  const qWithPrice = /fiyat|tl\b/i.test(query) ? query : `${query} fiyat TL`;
-  const url = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(qWithPrice)}&gl=tr&hl=tr&num=20&api_key=${encodeURIComponent(apiKey)}`;
+  const q1 = /fiyat|tl\b/i.test(query) ? query : `${query} fiyat`;
+  const url = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(q1)}&gl=tr&hl=tr&num=10&api_key=${encodeURIComponent(apiKey)}`;
   const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
   if (!res.ok) {
     throw new Error(`SerpAPI yanıt hatası (HTTP ${res.status})`);
@@ -403,10 +483,46 @@ export async function searchSerpApiTurkey(query, apiKey) {
     ratingCount: it.rich_snippet?.top?.detected_extensions?.reviews ?? it.rich_snippet?.bottom?.detected_extensions?.reviews,
   }));
 
-  return buildTurkeySearchResponse(query, organic, "", "Google Türkiye (SerpAPI)", "serpapi");
+  const inlineImgs = (Array.isArray(data.inline_images) ? data.inline_images : []).map((im) => ({
+    imageUrl: im.original || im.thumbnail,
+    thumbnailUrl: im.thumbnail,
+    title: im.title || "",
+    link: im.source || "",
+  }));
+
+  return buildTurkeySearchResponse(query, organic, inlineImgs, "Google Türkiye (SerpAPI)", "serpapi");
 }
 
-function buildTurkeySearchResponse(query, rawOrganic, fallbackImage, providerName, prefix) {
+function pickBestProductImage(title, linkHost, imagePool, fallbackIdx) {
+  if (!Array.isArray(imagePool) || !imagePool.length) return "";
+  const titleTokens = tokenize(title);
+
+  let bestImg = "";
+  let bestScore = -1;
+  for (const im of imagePool) {
+    const candidateUrl = im?.thumbnailUrl || im?.imageUrl || "";
+    if (!candidateUrl || candidateUrl.startsWith("data:")) continue;
+    let score = 0;
+    if (linkHost && im?.link && String(im.link).toLowerCase().includes(linkHost)) {
+      score += 3;
+    }
+    if (im?.title) {
+      score += overlapScore(titleTokens, tokenize(im.title)) * 2;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestImg = candidateUrl;
+    }
+  }
+
+  if (bestScore > 0.3 && bestImg) return bestImg;
+  const pick = imagePool[fallbackIdx % imagePool.length];
+  return pick?.thumbnailUrl || pick?.imageUrl || "";
+}
+
+function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, providerName, prefix) {
+  const imagePool = Array.isArray(imagePoolInput) ? imagePoolInput : [];
+  const defaultProductImage = imagePool[0]?.thumbnailUrl || imagePool[0]?.imageUrl || "";
   const seenUrls = new Set();
   const pricedOffers = [];
   const catalogLinks = [];
@@ -423,17 +539,20 @@ function buildTurkeySearchResponse(query, rawOrganic, fallbackImage, providerNam
     const priceInfo = extractOrganicPriceInfo(item);
     const snippet = String(item.snippet || "").replace(/\s+/g, " ").trim();
     const delivery = parseDeliverySpeed(snippet);
-    const imgUrl = item.imageUrl || item.thumbnailUrl || "";
+    const isAccessory = isAccessoryTitle(title, query);
+
+    const idx = pricedOffers.length + catalogLinks.length + 1;
+    const matchedPhoto =
+      item.imageUrl ||
+      item.thumbnailUrl ||
+      pickBestProductImage(title, storeMeta.host, imagePool, idx - 1);
 
     if (typeof item.rating === "number" && item.rating > 0) {
       store.sellerRating = Math.round(item.rating * 2 * 10) / 10;
       store.sellerReviews = item.ratingCount ? `${item.ratingCount} yorum` : "";
     }
 
-    const idx = pricedOffers.length + catalogLinks.length + 1;
     const vKey = `virtual:${prefix}:${encodeURIComponent(query)}:${idx}`;
-
-    // Extract seller count hint from Akakce/Cimri snippets like "+150 FİYAT" or "19 satıcı"
     const sellerCountMatch = snippet.match(/(?:\+(\d+)\s*FİYAT|(\d+)\s*satıcı)/i);
     const offerCountHint = sellerCountMatch ? Number.parseInt(sellerCountMatch[1] || sellerCountMatch[2], 10) : 1;
 
@@ -453,7 +572,8 @@ function buildTurkeySearchResponse(query, rawOrganic, fallbackImage, providerNam
         akakceBadge: "",
         url: link,
         isDirectLink: true,
-        image: imgUrl,
+        isAccessory,
+        image: matchedPhoto,
       };
       pricedOffers.push(offer);
 
@@ -465,38 +585,45 @@ function buildTurkeySearchResponse(query, rawOrganic, fallbackImage, providerNam
         title,
         url: vKey,
         externalUrl: link,
-        image: imgUrl || storeMeta.logoUrl || fallbackImage,
+        image: matchedPhoto || storeMeta.logoUrl || defaultProductImage,
         lowestPrice: netEstimate,
         offerCount: offerCountHint,
         badge: storeMeta.platform,
         source: storeMeta.platform,
+        isOfficialStore: store.isOfficialSeller || store.trustScore >= 0.92,
+        isFreeShipping: Boolean(priceInfo.shipping?.isFree),
+        isAccessory,
         unitInfo,
         _offer: offer,
       });
     } else {
-      // Unpriced store listing (e.g. Trendyol/Stradivarius category or product page without price in snippet)
       catalogLinks.push({
         id: `${prefix}-cat-${idx}`,
         title,
         url: link,
         store: storeMeta.platform,
+        isOfficialStore: store.isOfficialSeller || store.trustScore >= 0.92,
+        isAccessory,
         logoUrl: storeMeta.logoUrl,
-        image: imgUrl || storeMeta.logoUrl || fallbackImage,
+        image: matchedPhoto || storeMeta.logoUrl || defaultProductImage,
         snippet,
       });
     }
   }
 
-  // Analyze all priced offers across all discovered Turkish stores
-  const unitInfoGlobal = extractUnitInfo(query, pricedOffers[0]?.basePrice ?? null);
-  const analysis = analyzeOffers(pricedOffers, unitInfoGlobal);
+  // Prefer non-accessory offers for the main multi-store aggregate comparison
+  const primaryOffers = pricedOffers.filter((o) => !o.isAccessory);
+  const analysisPool = primaryOffers.length >= 2 ? primaryOffers : pricedOffers;
+
+  const unitInfoGlobal = extractUnitInfo(query, analysisPool[0]?.basePrice ?? null);
+  const analysis = analyzeOffers(analysisPool, unitInfoGlobal);
   const histAnalysis = analyzePriceHistory([], analysis.stats?.minNet ?? null);
 
   const aggregateKey = `virtual:${prefix}:all:${encodeURIComponent(query.toLocaleLowerCase("tr-TR"))}`;
   const bestImage =
-    pricedOffers.find((o) => o.image)?.image ||
+    analysisPool.find((o) => o.image)?.image ||
     catalogLinks.find((c) => c.image)?.image ||
-    fallbackImage;
+    defaultProductImage;
 
   const extraStoreVariants = catalogLinks.slice(0, 10).map((c) => ({
     name: `${c.store} — ${c.title.slice(0, 56)}`,
@@ -507,16 +634,17 @@ function buildTurkeySearchResponse(query, rawOrganic, fallbackImage, providerNam
   }));
 
   const aggregateDetail = {
-    id: `${prefix}-${Date.now()}`,
+    id: `${prefix}-${encodeURIComponent(query.toLocaleLowerCase("tr-TR")).slice(0, 32)}`,
     title: `${query} — Türkiye Mağaza Fiyat Karşılaştırması`,
+    searchQuery: query,
     brand: "",
     category: `${providerName} · Canlı Çoklu Mağaza Analizi`,
-    description: `${query} için Türkiye mağazalarından canlı derlenen ${pricedOffers.length} fiyatlı teklif ve ${catalogLinks.length} mağaza sayfası.`,
+    description: `${query} için Türkiye mağazalarından canlı derlenen ${analysisPool.length} fiyatlı teklif ve ${catalogLinks.length} mağaza sayfası.`,
     url: aggregateKey,
     image: bestImage,
     rating: null,
-    totalOfferCount: pricedOffers.length,
-    unitInfo: unitInfoGlobal ? extractUnitInfo(query, analysis.stats?.minNet ?? pricedOffers[0]?.basePrice) : null,
+    totalOfferCount: analysisPool.length,
+    unitInfo: unitInfoGlobal ? extractUnitInfo(query, analysis.stats?.minNet ?? analysisPool[0]?.basePrice) : null,
     fetchedAt: new Date().toISOString(),
     cached: false,
     provider: providerName,
@@ -532,16 +660,19 @@ function buildTurkeySearchResponse(query, rawOrganic, fallbackImage, providerNam
     verdict: {
       ...histAnalysis.verdict,
       score: analysis.stats ? (analysis.stats.savingsVsMedianPct >= 15 ? 82 : analysis.stats.savingsVsMedianPct >= 6 ? 72 : 64) : 60,
-      label: analysis.stats ? `${pricedOffers.length} Fiyatlı Teklif Karşılaştırıldı` : "Mağaza Bağlantıları Bulundu",
+      label: analysis.stats ? `${analysisPool.length} Fiyatlı Teklif Karşılaştırıldı` : "Mağaza Bağlantıları Bulundu",
       tone: analysis.stats && analysis.stats.savingsVsMedianPct >= 10 ? "good" : "good-soft",
       headline: analysis.stats
-        ? `En ucuz net teklif ${analysis.stats.minNet.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL (${analysis.picks?.cheapestNet?.store || ""}).`
+        ? `Doğrulanmış en ucuz net teklif ${analysis.stats.minNet.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL (${analysis.picks?.cheapestNet?.store || ""}).`
         : "Fiyatlar doğrudan mağaza sayfalarından incelenebilir.",
       reasons: analysis.stats
         ? [
             `Piyasa medyanı ${analysis.stats.medianNet.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL; en ucuz seçenek medyanın %${analysis.stats.savingsVsMedianPct} altında.`,
             `${analysis.platformBreakdown.length} farklı mağaza/platform karşılaştırıldı.`,
-            "Satın almadan önce mağaza linkinden güncel beden/renk ve kargo tutarını doğrulamanız önerilir.",
+            ...(analysis.stats.suspiciousLowCount > 0
+              ? [`${analysis.stats.suspiciousLowCount} adet piyasa medyanının çok altında (şüpheli ucuz / muadil / aksesuar) ilan ayrıştırıldı.`]
+              : []),
+            "Ürünü takibe aldığınızda her kontrolünüzde kendi fiyat geçmişi grafiğiniz otomatik oluşur.",
           ]
         : ["Bu aramada fiyat bilgisi ürün sayfalarının içinde yer alıyor; aşağıdaki mağaza linklerinden anında açabilirsiniz."],
     },
@@ -554,8 +685,8 @@ function buildTurkeySearchResponse(query, rawOrganic, fallbackImage, providerNam
   // Cache detail view for every individual priced card
   for (const p of products) {
     const itemTokens = tokenize(p.title);
-    const similar = pricedOffers.filter((o) => overlapScore(itemTokens, tokenize(o.offerTitle)) >= 0.4);
-    const pool = similar.length >= 2 ? similar : [p._offer, ...pricedOffers.slice(0, 11)].filter(Boolean);
+    const similar = analysisPool.filter((o) => overlapScore(itemTokens, tokenize(o.offerTitle)) >= 0.4);
+    const pool = similar.length >= 2 ? similar : [p._offer, ...analysisPool.slice(0, 11)].filter(Boolean);
     const dedup = [];
     const seen = new Set();
     for (const o of pool) {
@@ -570,6 +701,7 @@ function buildTurkeySearchResponse(query, rawOrganic, fallbackImage, providerNam
       ...aggregateDetail,
       id: p.id,
       title: p.title,
+      searchQuery: query,
       url: p.url,
       image: p.image || bestImage,
       totalOfferCount: dedup.length,
@@ -585,13 +717,14 @@ function buildTurkeySearchResponse(query, rawOrganic, fallbackImage, providerNam
     delete p._offer;
   }
 
-  // Also add unpriced catalog links as browsable cards (with direct external store jump + detail view)
+  // Add unpriced catalog links as browsable cards
   const catalogCards = catalogLinks.slice(0, 8).map((c) => {
-    const cKey = `virtual:${prefix}:cat:${encodeURIComponent(c.id)}`;
+    const cKey = `virtual:${prefix}:cat:${encodeURIComponent(query)}:${encodeURIComponent(c.id)}`;
     saveVirtualDetail(cKey, {
       ...aggregateDetail,
       id: c.id,
       title: c.title,
+      searchQuery: query,
       url: cKey,
       image: c.image || bestImage,
       description: c.snippet,
@@ -610,25 +743,34 @@ function buildTurkeySearchResponse(query, rawOrganic, fallbackImage, providerNam
       offerCount: 1,
       badge: c.store,
       source: c.store,
+      isOfficialStore: c.isOfficialStore,
+      isFreeShipping: false,
+      isAccessory: c.isAccessory,
       unitInfo: null,
     };
   });
 
-  // Sort priced cards by lowestPrice ascending, prepend aggregate summary card when >= 2 priced offers exist
-  products.sort((a, b) => (a.lowestPrice ?? Infinity) - (b.lowestPrice ?? Infinity));
+  // Sort priced cards: non-accessories first, then price ascending
+  products.sort((a, b) => {
+    if (a.isAccessory !== b.isAccessory) return a.isAccessory ? 1 : -1;
+    return (a.lowestPrice ?? Infinity) - (b.lowestPrice ?? Infinity);
+  });
 
   const finalProducts = [
-    ...(pricedOffers.length >= 2
+    ...(analysisPool.length >= 2
       ? [
           {
             id: `${prefix}-all`,
-            title: `📊 ${query} — Tüm Mağazaları Karşılaştır (${pricedOffers.length} fiyatlı teklif)`,
+            title: `📊 ${query} — Tüm Mağazaları Karşılaştır (${analysisPool.length} teklif)`,
             url: aggregateKey,
             image: bestImage,
             lowestPrice: analysis.stats?.minNet ?? null,
-            offerCount: pricedOffers.length,
+            offerCount: analysisPool.length,
             badge: "Tüm Mağazalar",
             source: providerName,
+            isOfficialStore: true,
+            isFreeShipping: Boolean(analysis.picks?.cheapestNet?.shippingCost === 0),
+            isAccessory: false,
             unitInfo: aggregateDetail.unitInfo,
           },
         ]
@@ -645,8 +787,112 @@ function buildTurkeySearchResponse(query, rawOrganic, fallbackImage, providerNam
     cached: false,
     totalFound: finalProducts.length,
     pricedFound: pricedOffers.length,
+    accessoryCount: finalProducts.filter((p) => p.isAccessory).length,
     products: finalProducts,
-    aggregateUrl: pricedOffers.length >= 2 ? aggregateKey : null,
+    aggregateUrl: analysisPool.length >= 2 ? aggregateKey : null,
+  };
+}
+
+/**
+ * Resolves an EAN-8 / EAN-13 / UPC-A / GTIN-14 barcode into a searchable Turkish product name
+ * using Open Food Facts, UPCitemdb, T.C. Market Fiyatı, and (when configured) Google TR search.
+ */
+export async function resolveBarcode(rawCode, options = {}) {
+  const code = String(rawCode || "").replace(/\D+/g, "").trim();
+  if (code.length < 8 || code.length > 14) {
+    throw new Error("Geçersiz barkod numarası (8 ile 14 haneli rakam olmalıdır).");
+  }
+
+  // 1. Open Food Facts (great for supermarket, coffee, beverage, food, personal care)
+  try {
+    const offRes = await fetch(
+      `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json?fields=product_name,product_name_tr,brands,quantity,image_url`,
+      { headers: { "User-Agent": "FiyatRadar/2.0" }, signal: AbortSignal.timeout(5000) }
+    );
+    if (offRes.ok) {
+      const off = await offRes.json();
+      if (off.status === 1 && off.product) {
+        const name = (off.product.product_name_tr || off.product.product_name || "").trim();
+        const brand = (off.product.brands || "").split(",")[0].trim();
+        const qty = (off.product.quantity || "").trim();
+        const parts = [brand, name, qty].filter(Boolean);
+        const query = [...new Set(parts)].join(" ").replace(/\s+/g, " ").trim();
+        if (query.length >= 3) {
+          return {
+            code,
+            query,
+            source: "Open Food Facts",
+            image: off.product.image_url || "",
+          };
+        }
+      }
+    }
+  } catch {
+    // Continue to next source
+  }
+
+  // 2. UPCitemdb free lookup (great for electronics, gadgets, global brands)
+  try {
+    const upcRes = await fetch(
+      `https://api.upcitemdb.com/prod/trial/lookup?upc=${encodeURIComponent(code)}`,
+      { headers: { "User-Agent": "FiyatRadar/2.0", Accept: "application/json" }, signal: AbortSignal.timeout(5000) }
+    );
+    if (upcRes.ok) {
+      const upc = await upcRes.json();
+      const first = upc?.items?.[0];
+      if (first?.title) {
+        return {
+          code,
+          query: String(first.title).trim().slice(0, 80),
+          source: "UPC Veritabanı",
+          image: first.images?.[0] || "",
+        };
+      }
+    }
+  } catch {
+    // Continue
+  }
+
+  // 3. Google Turkey barcode lookup via Serper (finds Turkish 869... EAN products!)
+  const serperKey = (options.serperKey || process.env.SERPER_API_KEY || "").trim();
+  if (serperKey) {
+    try {
+      const res = await fetch("https://google.serper.dev/search", {
+        method: "POST",
+        headers: { "X-API-KEY": serperKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ q: code, gl: "tr", hl: "tr", num: 5 }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const first = (data.organic || []).find((o) => o?.title && !isNonShoppingUrl(o.link));
+        if (first?.title) {
+          const cleanTitle = String(first.title)
+            .replace(/\s*[-|–]\s*(Trendyol|Hepsiburada|Amazon.*|n11|Akakçe|Cimri|Migros|PttAVM|MediaMarkt|Teknosa|Vatan|Fiyatı.*|Modelleri.*)$/i, "")
+            .replace(new RegExp(code, "g"), "")
+            .replace(/\s+/g, " ")
+            .trim();
+          if (cleanTitle.length >= 3) {
+            return {
+              code,
+              query: cleanTitle.slice(0, 80),
+              source: "Google Türkiye Barkod",
+              image: first.imageUrl || "",
+            };
+          }
+        }
+      }
+    } catch {
+      // Continue
+    }
+  }
+
+  // 4. Fallback: search the barcode number directly
+  return {
+    code,
+    query: code,
+    source: "Doğrudan Barkod Araması",
+    image: "",
   };
 }
 

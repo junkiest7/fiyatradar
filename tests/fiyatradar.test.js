@@ -2,20 +2,25 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   extractUnitInfo,
+  isAccessoryTitle,
   parseDeliverySpeed,
   parseShipping,
   parseStoreInfo,
   parseTrDate,
   parseTrPrice,
+  transliterateTr,
 } from "../src/parsers.js";
 import { analyzeOffers, analyzePriceHistory } from "../src/analyzer.js";
 import { getProductDetail, searchProducts } from "../src/scraper.js";
 import {
   extractOrganicPriceInfo,
   getVirtualDetail,
+  resolveBarcode,
   resolveStoreFromUrl,
   searchOfficialFallback,
 } from "../src/providers.js";
+import { extractQueryFromStoreUrl, isExternalStoreUrl } from "../src/urlResolver.js";
+import { optimizeCart } from "../src/optimizer.js";
 
 test("parseTrPrice handles both Turkish and Google/US formatted currency strings accurately", () => {
   assert.equal(parseTrPrice("54.999,00 TL"), 54999);
@@ -29,6 +34,18 @@ test("parseTrPrice handles both Turkish and Google/US formatted currency strings
   assert.equal(parseTrPrice("717,80 TL"), 717.8);
   assert.equal(parseTrPrice("6.900 TL"), 6900);
   assert.equal(parseTrPrice(""), null);
+});
+
+test("transliterateTr & isAccessoryTitle filter accessories only when query does not request them", () => {
+  assert.equal(transliterateTr("gucci güneş gözlüğü"), "gucci gunes gozlugu");
+  assert.equal(transliterateTr("ÇİÇEK ŞİŞE ÖRDEK ÜZÜM"), "CICEK SISE ORDEK UZUM");
+
+  assert.equal(isAccessoryTitle("iPhone 17 Pro MagSafe Silikon Kılıf", "iphone 17"), true);
+  assert.equal(isAccessoryTitle("iPhone 17 Pro MagSafe Silikon Kılıf", "iphone 17 kılıf"), false);
+  assert.equal(isAccessoryTitle("Philips Airfryer Pişirme Kağıdı 100'lü", "philips airfryer"), true);
+  assert.equal(isAccessoryTitle("Apple iPhone 17 256 GB Siyah", "iphone 17"), false);
+  assert.equal(isAccessoryTitle("Gucci GG1221S Kadın Güneş Gözlüğü", "gucci güneş gözlüğü"), false);
+  assert.equal(isAccessoryTitle("Gucci Gözlük Kılıfı & Temizleme Bezi", "gucci güneş gözlüğü"), true);
 });
 
 test("extractOrganicPriceInfo extracts TL prices, installment totals, and shipping from Google TR snippets", () => {
@@ -97,7 +114,7 @@ test("extractUnitInfo extracts kg, multipack ml, counts, and storage correctly",
   assert.equal(phone.quantity, 128);
 });
 
-test("analyzeOffers detects shipping traps, outliers, and ranks by net price", () => {
+test("analyzeOffers detects shipping traps, high outliers, and suspiciously-low anomalies", () => {
   const rawOffers = [
     {
       id: "o1",
@@ -137,6 +154,21 @@ test("analyzeOffers detects shipping traps, outliers, and ranks by net price", (
   assert.equal(analysis.offers[1].isShippingTrap, true);
   assert.equal(analysis.shippingTraps.length, 1);
   assert.equal(analysis.offers[2].isOutlier, true);
+
+  // Suspiciously-low fake/case listing (e.g. 1.104 TL alongside ~11.500 TL authentic sunglasses)
+  const luxuryOffers = [
+    { id: "fake", basePrice: 1104, shipping: parseShipping("Ücretsiz kargo"), store: parseStoreInfo("Trendyol", "/x"), inStock: true, delivery: parseDeliverySpeed("2 gün"), url: "https://t.co/1" },
+    { id: "g1", basePrice: 10500, shipping: parseShipping("Ücretsiz kargo"), store: parseStoreInfo("Boyner", ""), inStock: true, delivery: parseDeliverySpeed("2 gün"), url: "https://t.co/2" },
+    { id: "g2", basePrice: 11200, shipping: parseShipping("Ücretsiz kargo"), store: parseStoreInfo("Beymen", ""), inStock: true, delivery: parseDeliverySpeed("2 gün"), url: "https://t.co/3" },
+    { id: "g3", basePrice: 11800, shipping: parseShipping("Ücretsiz kargo"), store: parseStoreInfo("Atasun Optik", ""), inStock: true, delivery: parseDeliverySpeed("2 gün"), url: "https://t.co/4" },
+    { id: "g4", basePrice: 12400, shipping: parseShipping("Ücretsiz kargo"), store: parseStoreInfo("Hepsiburada", ""), inStock: true, delivery: parseDeliverySpeed("2 gün"), url: "https://t.co/5" },
+  ];
+  const luxAnalysis = analyzeOffers(luxuryOffers, null);
+  const fakeOffer = luxAnalysis.offers.find((o) => o.id === "fake");
+  assert.equal(fakeOffer.isSuspiciousLow, true);
+  assert.equal(luxAnalysis.stats.suspiciousLowCount, 1);
+  assert.equal(luxAnalysis.stats.minNet, 10500);
+  assert.equal(luxAnalysis.picks.cheapestNet.netPrice, 10500);
 });
 
 test("analyzePriceHistory calculates buy timing score and verdict", () => {
@@ -151,6 +183,92 @@ test("analyzePriceHistory calculates buy timing score and verdict", () => {
   assert.equal(res.summary.minPrice, 1000);
   assert.equal(res.summary.maxPrice, 1200);
   assert.ok(res.verdict.score >= 75, `Expected strong buy score >= 75, got ${res.verdict.score}`);
+});
+
+test("urlResolver recognizes Turkish store URLs, rejects unsafe/non-store URLs, and extracts clean queries", () => {
+  assert.equal(isExternalStoreUrl("https://www.trendyol.com/apple/iphone-17-256gb-siyah-p-985256842"), true);
+  assert.equal(isExternalStoreUrl("https://www.hepsiburada.com/philips-airfryer-xxl-hd9650-90-p-HBV00000ABC"), true);
+  assert.equal(isExternalStoreUrl("https://www.stradivarius.com/tr/kadin-topuklu-ayakkabi-l19234370"), true);
+  assert.equal(isExternalStoreUrl("https://ty.gl/abc123"), true);
+  assert.equal(isExternalStoreUrl("https://www.akakce.com/cep-telefonu/en-ucuz-iphone-15-fiyati,12345.html"), false);
+  assert.equal(isExternalStoreUrl("http://localhost:3456/admin"), false);
+  assert.equal(isExternalStoreUrl("http://169.254.169.254/latest/meta-data"), false);
+
+  const ty = extractQueryFromStoreUrl("https://www.trendyol.com/apple/iphone-17-256gb-siyah-p-985256842");
+  assert.match(ty.toLowerCase(), /apple.*iphone 17 256gb siyah/);
+
+  const hb = extractQueryFromStoreUrl("https://www.hepsiburada.com/philips-airfryer-xxl-hd9650-90-p-HBV00000ABC");
+  assert.match(hb.toLowerCase(), /philips airfryer xxl/);
+
+  const strad = extractQueryFromStoreUrl("https://www.stradivarius.com/tr/kadin-topuklu-ayakkabi-l19234370");
+  assert.match(strad.toLowerCase(), /stradivarius.*topuklu ayakkabi/);
+
+  const cimri = extractQueryFromStoreUrl("https://www.cimri.com/cep-telefonlari/en-ucuz-apple-iphone-17-fiyatlari,a2393572193");
+  assert.match(cimri.toLowerCase(), /apple iphone 17/);
+
+  const n11 = extractQueryFromStoreUrl("https://www.n11.com/urun/apple-iphone-15-128-gb-43821353");
+  assert.match(n11.toLowerCase(), /apple iphone 15 128 gb/);
+});
+
+test("optimizeCart picks Single-Store when free-shipping consolidation saves money, and Split-Store when cheaper", () => {
+  // Case 1: Single-Store wins due to Trendyol 250 TL free-shipping threshold
+  const cartConsolidate = [
+    {
+      id: "i1",
+      title: "Kahve 250g",
+      quantity: 1,
+      offers: [
+        { basePrice: 140, shippingCost: 50, netPrice: 190, shipping: { isFree: false, cost: 50 }, store: { platform: "n11", displayName: "n11" }, url: "https://n11.com/1" },
+        { basePrice: 145, shippingCost: 45, netPrice: 190, shipping: { isFree: false, cost: 45 }, store: { platform: "Trendyol", displayName: "Trendyol" }, url: "https://trendyol.com/1" },
+      ],
+    },
+    {
+      id: "i2",
+      title: "Filtre Kağıdı",
+      quantity: 1,
+      offers: [
+        { basePrice: 115, shippingCost: 50, netPrice: 165, shipping: { isFree: false, cost: 50 }, store: { platform: "Hepsiburada", displayName: "Hepsiburada" }, url: "https://hb.com/2" },
+        { basePrice: 120, shippingCost: 45, netPrice: 165, shipping: { isFree: false, cost: 45 }, store: { platform: "Trendyol", displayName: "Trendyol" }, url: "https://trendyol.com/2" },
+      ],
+    },
+  ];
+  const plan1 = optimizeCart(cartConsolidate);
+  // Split = (140+50) + (115+50) = 355 TL; Trendyol single = 145+120 = 265 TL (>=250 -> free ship!) => 90 TL savings!
+  assert.equal(plan1.recommendation.winner, "single");
+  assert.equal(plan1.recommendation.bestPlatform, "Trendyol");
+  assert.equal(plan1.recommendation.savings, 90);
+
+  // Case 2: Split-Store wins easily on big-ticket items with free shipping
+  const cartSplit = [
+    {
+      id: "b1",
+      title: "Airfryer",
+      quantity: 1,
+      offers: [
+        { basePrice: 5000, shippingCost: 0, netPrice: 5000, shipping: { isFree: true, cost: 0 }, store: { platform: "Amazon Türkiye", displayName: "Amazon Türkiye" }, url: "https://amazon.com.tr/1" },
+        { basePrice: 5800, shippingCost: 0, netPrice: 5800, shipping: { isFree: true, cost: 0 }, store: { platform: "Trendyol", displayName: "Trendyol" }, url: "https://trendyol.com/1" },
+      ],
+    },
+    {
+      id: "b2",
+      title: "Blender",
+      quantity: 1,
+      offers: [
+        { basePrice: 2000, shippingCost: 0, netPrice: 2000, shipping: { isFree: true, cost: 0 }, store: { platform: "Trendyol", displayName: "Trendyol" }, url: "https://trendyol.com/2" },
+        { basePrice: 2600, shippingCost: 0, netPrice: 2600, shipping: { isFree: true, cost: 0 }, store: { platform: "Amazon Türkiye", displayName: "Amazon Türkiye" }, url: "https://amazon.com.tr/2" },
+      ],
+    },
+  ];
+  const plan2 = optimizeCart(cartSplit);
+  assert.equal(plan2.recommendation.winner, "split");
+  assert.equal(plan2.splitStrategy.total, 7000);
+  assert.equal(plan2.recommendation.savings, 600);
+});
+
+test("Live integration: resolveBarcode resolves EAN-13 Nutella barcode via Open Food Facts", async () => {
+  const b = await resolveBarcode("3017620422003");
+  assert.equal(b.code, "3017620422003");
+  assert.match(b.query.toLowerCase(), /nutella/);
 });
 
 test("Live integration: searchProducts & getProductDetail return real Turkish market data", async () => {

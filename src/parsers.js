@@ -384,3 +384,58 @@ export function formatTrNumber(n) {
     maximumFractionDigits: 2,
   }).format(n);
 }
+
+/**
+ * Transliterates Turkish characters to ASCII for retry queries (e.g. "güneş gözlüğü" -> "gunes gozlugu").
+ * @param {string} str
+ */
+export function transliterateTr(str) {
+  const map = {
+    ğ: "g",
+    ü: "u",
+    ş: "s",
+    ı: "i",
+    ö: "o",
+    ç: "c",
+    Ğ: "G",
+    Ü: "U",
+    Ş: "S",
+    İ: "I",
+    Ö: "O",
+    Ç: "C",
+  };
+  return String(str || "").replace(/[ğüşıöçĞÜŞİÖÇ]/g, (c) => map[c] || c);
+}
+
+const ACCESSORY_RULES = [
+  { keyword: "kilif", pattern: /\b(kilif|kilifi|kiliflari|case|cover|kapak)\b/i },
+  { keyword: "ekran koruyucu", pattern: /\b(ekran\s+koruyucu|hayalet\s+cam|temperli\s+cam|kirilmaz\s+cam|lens\s+koruyucu|kamera\s+koruyucu)\b/i },
+  { keyword: "kordon", pattern: /\b(kordon|kayis|kayisi|bileklik\s+kayisi)\b/i },
+  { keyword: "pisirme kagidi", pattern: /\b(pisirme\s+kagidi|silikon\s+kalip|silikon\s+kalibi|izgara\s+seti)\b/i },
+  { keyword: "gozluk ipi", pattern: /\b(gozluk\s+ipi|gozluk\s+zinciri|gozluk\s+kabi|gozluk\s+kutusu|temizleme\s+spreyi|silme\s+bezi|temizleme\s+bezi)\b/i },
+  { keyword: "yedek parca", pattern: /\b(yedek\s+parca|yedek\s+baslik|yedek\s+basligi|yedek\s+filtre|batarya\s+pili|yedek\s+cam|aksesuar\s+seti|bos\s+kutu)\b/i },
+  { keyword: "sarj", pattern: /\b(sarj\s+kablosu|sarj\s+aleti|adaptor|powerbank|arac\s+tutucu|masa\s+standi|stant)\b/i },
+  { keyword: "ayakkabi bakim", pattern: /\b(ayakkabi\s+kalibi|tabanlik|bagcik|ayakkabi\s+boyasi|ayakkabi\s+torbasi)\b/i },
+];
+
+/**
+ * Smartly determines if a listing title is an accessory/case/spare-part
+ * UNLESS the user's own query explicitly asked for that accessory.
+ * Uses ASCII transliteration so JS regex word boundaries (\b) work reliably on all Turkish letters.
+ * @param {string} title
+ * @param {string} query
+ * @returns {boolean}
+ */
+export function isAccessoryTitle(title, query = "") {
+  if (!title) return false;
+  const qNorm = transliterateTr(String(query || "")).toLowerCase();
+  const tNorm = transliterateTr(String(title || "")).toLowerCase();
+
+  for (const rule of ACCESSORY_RULES) {
+    if (rule.pattern.test(tNorm) && !rule.pattern.test(qNorm)) {
+      return true;
+    }
+  }
+  return false;
+}
+

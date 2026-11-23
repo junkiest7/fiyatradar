@@ -14,6 +14,7 @@ import {
 } from "./scraper.js";
 import {
   clearSearchHistory,
+  getPriceSnapshots,
   getSearchHistory,
   getWatchlist,
   recordSearch,
@@ -22,7 +23,8 @@ import {
   updateWatchlistTarget,
   upsertWatchlistItem,
 } from "./db.js";
-import { testSerperKey } from "./providers.js";
+import { resolveBarcode, testSerperKey } from "./providers.js";
+import { optimizeCart } from "./optimizer.js";
 import { formatTrNumber } from "./parsers.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -157,6 +159,24 @@ app.get("/api/search", async (req, res) => {
   }
 });
 
+function extractReqKeys(req) {
+  return {
+    serperKey: String(req.headers["x-serper-key"] || "").trim(),
+    serpApiKey: String(req.headers["x-serpapi-key"] || "").trim(),
+  };
+}
+
+// Barcode lookup (EAN-8 / EAN-13 / UPC-A / GTIN-14)
+app.get("/api/barcode/:code", async (req, res) => {
+  try {
+    const keys = extractReqKeys(req);
+    const resolved = await resolveBarcode(req.params.code, keys);
+    res.json(resolved);
+  } catch (err) {
+    res.status(400).json({ error: err.message || "Barkod çözümlenemedi." });
+  }
+});
+
 // Deep single-product price analysis
 app.get("/api/product", async (req, res) => {
   try {
@@ -165,7 +185,9 @@ app.get("/api/product", async (req, res) => {
       return res.status(400).json({ error: "Ürün bağlantısı (url) gereklidir." });
     }
     const refresh = req.query.refresh === "1" || req.query.refresh === "true";
-    const detail = await getProductDetail(rawUrl, { refresh });
+    const fallbackQuery = String(req.query.title || "").trim();
+    const keys = extractReqKeys(req);
+    const detail = await getProductDetail(rawUrl, { refresh, fallbackQuery, ...keys });
 
     if (detail.id && detail.stats?.minNet) {
       try {
@@ -188,25 +210,35 @@ app.get("/api/product", async (req, res) => {
   }
 });
 
+// Recorded personal price history snapshots for a product
+app.get("/api/snapshots/:id", (req, res) => {
+  res.json({ items: getPriceSnapshots(req.params.id, 90) });
+});
+
 // Side-by-side comparison of up to 4 products
 app.post("/api/compare", async (req, res) => {
   try {
     const urls = Array.isArray(req.body?.urls) ? req.body.urls.slice(0, 4) : [];
+    const titles = Array.isArray(req.body?.titles) ? req.body.titles : [];
     if (urls.length < 2) {
       return res.status(400).json({ error: "Karşılaştırma için en az 2 ürün seçmelisiniz." });
     }
 
-    const validUrls = urls.map(normalizeProductUrl).filter(Boolean);
-    if (validUrls.length < 2) {
+    const keys = extractReqKeys(req);
+    const entries = urls
+      .map((u, idx) => ({ url: normalizeProductUrl(u), title: String(titles[idx] || "") }))
+      .filter((e) => Boolean(e.url));
+
+    if (entries.length < 2) {
       return res.status(400).json({ error: "Geçerli en az 2 ürün bağlantısı gereklidir." });
     }
 
     const results = await Promise.all(
-      validUrls.map(async (u) => {
+      entries.map(async (entry) => {
         try {
-          return await getProductDetail(u);
+          return await getProductDetail(entry.url, { fallbackQuery: entry.title, ...keys });
         } catch (err) {
-          return { url: u, error: err.message };
+          return { url: entry.url, error: err.message };
         }
       })
     );
@@ -238,11 +270,50 @@ app.post("/api/compare", async (req, res) => {
   }
 });
 
+// Shopping Cart Cost Optimizer (Split-Store vs Single-Store consolidation)
+app.post("/api/cart/optimize", async (req, res) => {
+  try {
+    const rawItems = Array.isArray(req.body?.items) ? req.body.items.slice(0, 12) : [];
+    if (!rawItems.length) {
+      return res.status(400).json({ error: "Optimizasyon için sepetinizde en az 1 ürün olmalıdır." });
+    }
+
+    const keys = extractReqKeys(req);
+    const hydrated = await Promise.all(
+      rawItems.map(async (it) => {
+        const normUrl = normalizeProductUrl(it.url);
+        if (!normUrl) return null;
+        try {
+          const detail = await getProductDetail(normUrl, {
+            fallbackQuery: it.title || "",
+            ...keys,
+          });
+          return {
+            id: detail.id || it.id,
+            title: detail.title || it.title,
+            image: detail.image || it.image || "",
+            quantity: Math.max(1, Number.parseInt(it.quantity, 10) || 1),
+            offers: detail.offers || [],
+          };
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    const plan = optimizeCart(hydrated.filter(Boolean));
+    res.json(plan);
+  } catch (err) {
+    res.status(500).json({ error: err.message || "Sepet optimizasyonu hesaplanamadı." });
+  }
+});
+
 // CSV export (UTF-8 BOM + semicolon delimiter for seamless Turkish Excel import)
 app.get("/api/export/csv", async (req, res) => {
   try {
     const rawUrl = String(req.query.url || "").trim();
-    const detail = await getProductDetail(rawUrl);
+    const keys = extractReqKeys(req);
+    const detail = await getProductDetail(rawUrl, { fallbackQuery: String(req.query.title || ""), ...keys });
 
     const escapeCsv = (val) => {
       const s = String(val ?? "").replace(/"/g, '""');
@@ -366,14 +437,19 @@ app.delete("/api/watchlist/:id", (req, res) => {
   res.json({ ok: true, items: getWatchlist() });
 });
 
-// Live batch refresh of all watched items
-app.post("/api/watchlist/refresh", async (_req, res) => {
+// Live batch refresh of all watched items (with automatic API key forwarding + virtual URL re-hydration)
+app.post("/api/watchlist/refresh", async (req, res) => {
   try {
+    const keys = extractReqKeys(req);
     const current = getWatchlist();
     const results = [];
     for (const item of current) {
       try {
-        const detail = await getProductDetail(item.url, { refresh: true });
+        const detail = await getProductDetail(item.url, {
+          refresh: true,
+          fallbackQuery: item.title,
+          ...keys,
+        });
         upsertWatchlistItem({
           id: item.id,
           title: detail.title,
