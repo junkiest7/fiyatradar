@@ -10,6 +10,7 @@ import {
 } from "../src/parsers.js";
 import { analyzeOffers, analyzePriceHistory } from "../src/analyzer.js";
 import { getProductDetail, searchProducts } from "../src/scraper.js";
+import { getVirtualDetail, searchOfficialFallback } from "../src/providers.js";
 
 test("parseTrPrice handles Turkish formatted currency strings accurately", () => {
   assert.equal(parseTrPrice("54.999,00 TL"), 54999);
@@ -128,4 +129,16 @@ test("Live integration: searchProducts & getProductDetail return real Turkish ma
   assert.ok(detail.stats.minNet > 0);
   assert.ok(detail.picks.cheapestNet.netPrice === detail.stats.minNet);
   assert.ok(detail.verdict.score >= 1 && detail.verdict.score <= 100);
+});
+
+test("Live integration: cloud-proof official fallback (MarketFiyati + Migros) returns real products & detail", async () => {
+  const fb = await searchOfficialFallback("prima bebek bezi");
+  assert.ok(fb.products.length >= 2, `Expected >= 2 fallback products, got ${fb.products.length}`);
+  const first = fb.products[0];
+  assert.ok(first.url.startsWith("virtual:"));
+  assert.ok(first.lowestPrice > 0);
+  const det = await getProductDetail(first.url);
+  assert.ok(det.offers.length >= 1);
+  assert.ok(det.stats.minNet > 0);
+  assert.ok(getVirtualDetail(first.url) !== null);
 });

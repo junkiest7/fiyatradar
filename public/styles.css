@@ -1709,8 +1709,128 @@ select {
 }
 
 /* ==========================================================================
-   iOS PWA & Mobile Native App Layer
+   Settings Modal, Fallback Notice & iOS PWA Mobile App Layer
    ========================================================================== */
+
+.settings-icon-btn {
+  position: relative;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--ink-secondary);
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.settings-icon-btn:hover {
+  background: var(--bg-subtle);
+  color: var(--ink);
+}
+
+.api-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--good);
+  border: 1.5px solid var(--bg-surface);
+}
+
+.fallback-notice {
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius-md);
+  padding: 13px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.84rem;
+  color: var(--ink);
+}
+
+.fallback-notice-text {
+  flex: 1;
+  min-width: 240px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: rgba(20, 21, 23, 0.48);
+  backdrop-filter: blur(4px);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+
+.modal-backdrop[hidden] {
+  display: none;
+}
+
+.modal-sheet {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  width: min(500px, 100%);
+  padding: 20px 22px;
+  box-shadow: var(--shadow-lg);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: 1.06rem;
+  font-weight: 800;
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-field label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.field-help-link {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--primary);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 6px;
+}
 
 /* Desktop defaults: hide mobile-only components */
 .mobile-tab-bar,
@@ -1889,7 +2009,7 @@ body {
 
   .topbar-inner {
     height: 52px;
-    justify-content: center;
+    justify-content: space-between;
   }
 
   /* Hide desktop top nav & print button; use native iOS bottom tab bar */

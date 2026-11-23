@@ -15,6 +15,12 @@ import {
   parseTrPrice,
 } from "./parsers.js";
 import { analyzeOffers, analyzePriceHistory } from "./analyzer.js";
+import {
+  getVirtualDetail,
+  searchOfficialFallback,
+  searchSerpApiShopping,
+  searchSerperShopping,
+} from "./providers.js";
 
 const BASE_URL = "https://www.akakce.com";
 const DEFAULT_HEADERS = {
@@ -51,11 +57,14 @@ function setCached(key, data, ttlMs) {
 }
 
 /**
- * Validates and normalizes an Akakce product URL (SSRF-safe).
+ * Validates and normalizes an Akakce product URL or internal virtual provider key (SSRF-safe).
  */
 export function normalizeProductUrl(input) {
   if (!input || typeof input !== "string") return null;
   const trimmed = input.trim();
+  if (/^virtual:(serper|serpapi|mf|migros):/.test(trimmed)) {
+    return trimmed;
+  }
   if (trimmed.startsWith("/")) {
     return `${BASE_URL}${trimmed}`;
   }
@@ -118,8 +127,10 @@ export async function getSuggestions(query) {
 }
 
 /**
- * Searches Turkish e-commerce products via Akakce and enriches every listing
- * with parsed price, offer count, and automatic unit price (TL/kg, TL/lt, TL/adet, TL/GB).
+ * Searches Turkish e-commerce products with automatic multi-provider fallback:
+ * 1. Serper.dev / SerpAPI Google Shopping TR (when API key is provided — 100% cloud-proof across 50+ TR stores)
+ * 2. Akakçe direct live engine (when server IP is accepted)
+ * 3. Zero-key Official Fallback (T.C. Market Fiyatı + Migros Elektronik + Migros Sanal Market)
  */
 export async function searchProducts(query, options = {}) {
   const q = (query || "").trim();
@@ -127,12 +138,16 @@ export async function searchProducts(query, options = {}) {
     throw new Error("Arama terimi boş olamaz.");
   }
 
+  const serperKey = (options.serperKey || process.env.SERPER_API_KEY || "").trim();
+  const serpApiKey = (options.serpApiKey || process.env.SERPAPI_KEY || "").trim();
+
   // If user pasted a direct Akakce URL, return a direct redirect hint
   const maybeUrl = normalizeProductUrl(q);
   if (maybeUrl && maybeUrl.includes("fiyati,")) {
     const detail = await getProductDetail(maybeUrl, { refresh: options.refresh });
     return {
       query: q,
+      provider: detail.provider || "Akakçe",
       directProduct: true,
       fetchedAt: detail.fetchedAt,
       cached: detail.cached,
@@ -153,6 +168,30 @@ export async function searchProducts(query, options = {}) {
     };
   }
 
+  // Priority 1: Official Google Shopping TR via Serper.dev (cloud-proof, 50+ TR stores)
+  if (serperKey) {
+    const cKey = `serper:${q.toLocaleLowerCase("tr-TR")}`;
+    if (!options.refresh) {
+      const cached = getCached(cKey);
+      if (cached) return { ...cached, cached: true };
+    }
+    const result = await searchSerperShopping(q, serperKey);
+    setCached(cKey, result, SEARCH_TTL_MS);
+    return result;
+  }
+
+  // Priority 2: Official Google Shopping TR via SerpAPI
+  if (serpApiKey) {
+    const cKey = `serpapi:${q.toLocaleLowerCase("tr-TR")}`;
+    if (!options.refresh) {
+      const cached = getCached(cKey);
+      if (cached) return { ...cached, cached: true };
+    }
+    const result = await searchSerpApiShopping(q, serpApiKey);
+    setCached(cKey, result, SEARCH_TTL_MS);
+    return result;
+  }
+
   const page = Math.max(1, Number.parseInt(options.page, 10) || 1);
   const cacheKey = `search:${q.toLocaleLowerCase("tr-TR")}:p${page}`;
 
@@ -163,8 +202,20 @@ export async function searchProducts(query, options = {}) {
     }
   }
 
-  const searchUrl = `${BASE_URL}/arama/?q=${encodeURIComponent(q)}${page > 1 ? `&p=${page}` : ""}`;
-  const html = await fetchHtml(searchUrl);
+  // Priority 3: Direct Akakce live search, with automatic fallback on 403/timeout (e.g. Render cloud IP)
+  let html;
+  try {
+    const searchUrl = `${BASE_URL}/arama/?q=${encodeURIComponent(q)}${page > 1 ? `&p=${page}` : ""}`;
+    html = await fetchHtml(searchUrl);
+  } catch (akakceErr) {
+    const fallback = await searchOfficialFallback(q);
+    fallback.fallbackReason = akakceErr.message || "Akakçe erişimi kısıtlandı";
+    fallback.fallbackNotice =
+      "Bulut sunucu IP'si nedeniyle Akakçe doğrudan erişimi kısıtlandı; şu an Migros Elektronik ve T.C. Market Fiyatı resmi kaynakları taranıyor. Trendyol, Hepsiburada, Amazon TR, n11, MediaMarkt dahil 50+ mağazanın tamamı için Ayarlar'dan ücretsiz Serper API anahtarı (2.500 ücretsiz arama) ekleyebilirsiniz.";
+    setCached(cacheKey, fallback, 2 * 60 * 1000);
+    return fallback;
+  }
+
   const $ = cheerio.load(html);
 
   const products = [];
@@ -211,12 +262,14 @@ export async function searchProducts(query, options = {}) {
       lowestPrice,
       offerCount,
       badge: badge && badge !== "En Ucuz" ? badge : "",
+      source: "Akakçe",
       unitInfo,
     });
   });
 
   const payload = {
     query: q,
+    provider: "Akakçe (50+ Mağaza)",
     directProduct: false,
     page,
     fetchedAt: new Date().toISOString(),
@@ -235,7 +288,16 @@ export async function searchProducts(query, options = {}) {
 export async function getProductDetail(rawUrl, options = {}) {
   const url = normalizeProductUrl(rawUrl);
   if (!url) {
-    throw new Error("Geçersiz ürün bağlantısı. Lütfen geçerli bir Akakçe ürün bağlantısı kullanın.");
+    throw new Error("Geçersiz ürün bağlantısı.");
+  }
+
+  // Handle virtual provider product detail (Google Shopping TR, T.C. Market Fiyatı, Migros)
+  if (url.startsWith("virtual:")) {
+    const cachedVirtual = getVirtualDetail(url);
+    if (cachedVirtual) {
+      return cachedVirtual;
+    }
+    throw new Error("Bu ürünün geçici analiz oturumu süresi doldu. Lütfen ürünü yeniden aratın.");
   }
 
   const cacheKey = `detail:${url}`;

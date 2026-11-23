@@ -64,6 +64,15 @@ const els = {
   mobileWatchlistBadge: $("mobileWatchlistBadge"),
   iosInstallBanner: $("iosInstallBanner"),
   dismissIosBannerBtn: $("dismissIosBannerBtn"),
+  openSettingsBtn: $("openSettingsBtn"),
+  closeSettingsBtn: $("closeSettingsBtn"),
+  settingsModal: $("settingsModal"),
+  settingsForm: $("settingsForm"),
+  serperKeyInput: $("serperKeyInput"),
+  serpApiKeyInput: $("serpApiKeyInput"),
+  clearApiKeysBtn: $("clearApiKeysBtn"),
+  apiReadyDot: $("apiReadyDot"),
+  fallbackNoticeBanner: $("fallbackNoticeBanner"),
   compareBasketBar: $("compareBasketBar"),
   compareResultContainer: $("compareResultContainer"),
   runCompareBtn: $("runCompareBtn"),
@@ -247,9 +256,33 @@ function switchView(view) {
   if (view === "history") loadHistory();
 }
 
+// API Key storage helpers (stored locally on user's iPhone/browser)
+function getStoredApiKeys() {
+  try {
+    return {
+      serperKey: (localStorage.getItem("fiyatradar_serper_key") || "").trim(),
+      serpApiKey: (localStorage.getItem("fiyatradar_serpapi_key") || "").trim(),
+    };
+  } catch {
+    return { serperKey: "", serpApiKey: "" };
+  }
+}
+
+function updateApiStatusDot(serverReady = false) {
+  const { serperKey, serpApiKey } = getStoredApiKeys();
+  if (els.apiReadyDot) {
+    els.apiReadyDot.hidden = !(serverReady || serperKey || serpApiKey);
+  }
+}
+
 // API Fetch Helper
 async function apiFetch(url, options = {}) {
-  const res = await fetch(url, options);
+  const { serperKey, serpApiKey } = getStoredApiKeys();
+  const headers = new Headers(options.headers || {});
+  if (serperKey) headers.set("X-Serper-Key", serperKey);
+  if (serpApiKey) headers.set("X-SerpApi-Key", serpApiKey);
+
+  const res = await fetch(url, { ...options, headers });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(data.error || `Sunucu hatası (HTTP ${res.status})`);
@@ -341,14 +374,37 @@ function renderSearchResults() {
   if (!data) return;
 
   els.resultsHeading.textContent = `"${data.query}" sonuçları`;
-  els.resultsSubmeta.textContent = `${data.filteredCount} / ${data.totalFound} ürün listelendi${data.cached ? " · Önbellekten hızlı yüklendi" : " · Canlı veri"}`;
+  const providerTag = data.provider ? ` · Kaynak: ${data.provider}` : "";
+  els.resultsSubmeta.textContent = `${data.filteredCount} / ${data.totalFound} ürün listelendi${providerTag}${data.cached ? " · Önbellek" : " · Canlı"}`;
+
+  if (els.fallbackNoticeBanner) {
+    if (data.fallbackNotice) {
+      els.fallbackNoticeBanner.hidden = false;
+      els.fallbackNoticeBanner.innerHTML = `
+        <div class="fallback-notice-text">
+          <strong>Yedek Canlı Kaynak Aktif:</strong> ${esc(data.fallbackNotice)}
+        </div>
+        <button type="button" class="btn btn-primary btn-sm" id="fallbackOpenSettingsBtn">50+ Mağazayı Aç (Ücretsiz API)</button>
+      `;
+      $("fallbackOpenSettingsBtn")?.addEventListener("click", openSettingsModal);
+    } else {
+      els.fallbackNoticeBanner.hidden = true;
+      els.fallbackNoticeBanner.innerHTML = "";
+    }
+  }
 
   if (!data.products.length) {
     els.resultsGrid.innerHTML = `
       <div class="empty-state" style="grid-column:1/-1;">
         <h3>Eşleşen ürün bulunamadı</h3>
-        <p>Fiyat filtresini gevşetmeyi veya daha genel bir model adı denemeyi düşünün.</p>
+        <p>${
+          data.fallbackMode
+            ? "Bu ürün Migros Elektronik / T.C. Market Fiyatı kataloğunda bulunamadı. Trendyol, Hepsiburada, Amazon TR, n11 ve MediaMarkt dahil tüm Türkiye mağazalarını taramak için Ayarlar'dan ücretsiz Serper API anahtarı (2.500 ücretsiz arama) ekleyebilirsiniz."
+            : "Fiyat filtresini gevşetmeyi veya daha genel bir model adı denemeyi düşünün."
+        }</p>
+        ${data.fallbackMode ? `<button type="button" class="btn btn-primary btn-sm" id="emptyOpenSettingsBtn" style="margin-top:10px;">Ücretsiz 50+ Mağaza API Ayarla</button>` : ""}
       </div>`;
+    $("emptyOpenSettingsBtn")?.addEventListener("click", openSettingsModal);
     return;
   }
 
@@ -1612,6 +1668,56 @@ function bindEvents() {
       // Ignore
     }
   });
+
+  // Settings Modal handlers
+  els.openSettingsBtn?.addEventListener("click", openSettingsModal);
+  els.closeSettingsBtn?.addEventListener("click", closeSettingsModal);
+  els.settingsModal?.addEventListener("click", (e) => {
+    if (e.target === els.settingsModal) closeSettingsModal();
+  });
+
+  els.settingsForm?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const serper = (els.serperKeyInput?.value || "").trim();
+    const serpApi = (els.serpApiKeyInput?.value || "").trim();
+    try {
+      if (serper) localStorage.setItem("fiyatradar_serper_key", serper);
+      else localStorage.removeItem("fiyatradar_serper_key");
+      if (serpApi) localStorage.setItem("fiyatradar_serpapi_key", serpApi);
+      else localStorage.removeItem("fiyatradar_serpapi_key");
+    } catch {
+      // Ignore
+    }
+    updateApiStatusDot();
+    closeSettingsModal();
+    showToast(serper || serpApi ? "Google Shopping TR (50+ Mağaza) aktif edildi!" : "API anahtarları temizlendi.");
+    if (state.lastQuery) performSearch(state.lastQuery, { refresh: true });
+  });
+
+  els.clearApiKeysBtn?.addEventListener("click", () => {
+    if (els.serperKeyInput) els.serperKeyInput.value = "";
+    if (els.serpApiKeyInput) els.serpApiKeyInput.value = "";
+    try {
+      localStorage.removeItem("fiyatradar_serper_key");
+      localStorage.removeItem("fiyatradar_serpapi_key");
+    } catch {
+      // Ignore
+    }
+    updateApiStatusDot();
+    showToast("Kayıtlı API anahtarları temizlendi.");
+  });
+}
+
+function openSettingsModal() {
+  if (!els.settingsModal) return;
+  const { serperKey, serpApiKey } = getStoredApiKeys();
+  if (els.serperKeyInput) els.serperKeyInput.value = serperKey;
+  if (els.serpApiKeyInput) els.serpApiKeyInput.value = serpApiKey;
+  els.settingsModal.hidden = false;
+}
+
+function closeSettingsModal() {
+  if (els.settingsModal) els.settingsModal.hidden = true;
 }
 
 function initPwa() {
@@ -1639,4 +1745,8 @@ function initPwa() {
 bindEvents();
 initPwa();
 updateCompareBadges();
+updateApiStatusDot();
+apiFetch("/api/providers")
+  .then((p) => updateApiStatusDot(Boolean(p.googleShoppingReady)))
+  .catch(() => {});
 loadWatchlist();

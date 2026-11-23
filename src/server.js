@@ -51,6 +51,21 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
+// Active provider configuration status (never leaks key values)
+app.get("/api/providers", (req, res) => {
+  const hasServerSerper = Boolean((process.env.SERPER_API_KEY || "").trim());
+  const hasServerSerpApi = Boolean((process.env.SERPAPI_KEY || "").trim());
+  const hasClientSerper = Boolean(String(req.headers["x-serper-key"] || "").trim());
+  const hasClientSerpApi = Boolean(String(req.headers["x-serpapi-key"] || "").trim());
+  res.json({
+    googleShoppingReady: hasServerSerper || hasServerSerpApi || hasClientSerper || hasClientSerpApi,
+    serverSerper: hasServerSerper,
+    serverSerpApi: hasServerSerpApi,
+    clientSerper: hasClientSerper,
+    clientSerpApi: hasClientSerpApi,
+  });
+});
+
 // Live Turkish autocomplete suggestions
 app.get("/api/suggest", async (req, res) => {
   try {
@@ -76,8 +91,10 @@ app.get("/api/search", async (req, res) => {
     const sort = String(req.query.sort || "relevance");
     const minPrice = req.query.minPrice ? Number.parseFloat(req.query.minPrice) : null;
     const maxPrice = req.query.maxPrice ? Number.parseFloat(req.query.maxPrice) : null;
+    const serperKey = String(req.headers["x-serper-key"] || "").trim();
+    const serpApiKey = String(req.headers["x-serpapi-key"] || "").trim();
 
-    const result = await searchProducts(q, { page, refresh });
+    const result = await searchProducts(q, { page, refresh, serperKey, serpApiKey });
     let list = [...result.products];
 
     if (Number.isFinite(minPrice)) {

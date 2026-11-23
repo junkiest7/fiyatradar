@@ -2,6 +2,7 @@ services:
   - type: web
     name: fiyatradar
     runtime: node
+    region: frankfurt
     plan: free
     buildCommand: npm install
     startCommand: npm start
@@ -13,3 +14,7 @@ services:
         value: "22"
       - key: TIMEZONE
         value: Europe/Istanbul
+      - key: SERPER_API_KEY
+        sync: false
+      - key: SERPAPI_KEY
+        sync: false

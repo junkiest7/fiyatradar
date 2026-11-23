@@ -3,7 +3,7 @@
  * App-shell caching for fast iPhone standalone launch + graceful offline handling.
  */
 
-const CACHE_NAME = "fiyatradar-v2";
+const CACHE_NAME = "fiyatradar-v3";
 const SHELL_ASSETS = [
   "/",
   "/index.html",
