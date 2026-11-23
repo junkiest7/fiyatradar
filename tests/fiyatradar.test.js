@@ -10,20 +10,32 @@ import {
   parseStoreInfo,
   parseTrDate,
   parseTrPrice,
+  suggestWatchlistFolder,
   transliterateTr,
 } from "../src/parsers.js";
-import { analyzeOffers, analyzePriceHistory } from "../src/analyzer.js";
+import { analyzeOffers, analyzePriceHistory, detectFakeDiscount } from "../src/analyzer.js";
 import { getProductDetail, searchProducts } from "../src/scraper.js";
 import {
+  buildSecondHandQuickLinks,
   buildTurkeySearchResponse,
   classifyStoreUrl,
+  detectSecondHandCondition,
   extractOrganicPriceInfo,
   getVirtualDetail,
+  isSecondHandOffer,
   pickBestProductImage,
   resolveBarcode,
   resolveStoreFromUrl,
   searchOfficialFallback,
+  searchSecondHandTurkey,
 } from "../src/providers.js";
+import {
+  getWatchlist,
+  removeWatchlistItem,
+  summarizeWatchlistBudget,
+  updateWatchlistItem,
+  upsertWatchlistItem,
+} from "../src/db.js";
 import { extractQueryFromStoreUrl, isExternalStoreUrl } from "../src/urlResolver.js";
 import { optimizeCart } from "../src/optimizer.js";
 import { isPrivateOrReservedIp } from "../src/server.js";
@@ -605,4 +617,210 @@ test("buildTurkeySearchResponse isolates direct Zara perfume products from Trend
   assert.equal(vibrantDetail.picks.cheapestNet.url, "https://www.trendyol.com/zara/vibrant-leather-edp-100-ml-p-34055913");
   assert.ok(vibrantDetail.variants.some((v) => v.isInternalVirtual && v.url === seoulCard.url));
 });
+
+test("detectFakeDiscount catches 'Bindirim → İndirim' traps, partial discounts, genuine drops, inflation, and list-price inflation", () => {
+  // 1. Classic 11.11 / Efsane Cuma fake discount: normal ~1000 TL -> spiked to 1450 TL -> 'discounted' to 1020 TL
+  const fakeSeries = [
+    { isoDate: "2026-09-01", dateLabel: "01.09.2026", price: 990 },
+    { isoDate: "2026-09-15", dateLabel: "15.09.2026", price: 1000 },
+    { isoDate: "2026-10-01", dateLabel: "01.10.2026", price: 1010 },
+    { isoDate: "2026-10-15", dateLabel: "15.10.2026", price: 1000 },
+    { isoDate: "2026-11-05", dateLabel: "05.11.2026", price: 1450 },
+    { isoDate: "2026-11-11", dateLabel: "11.11.2026", price: 1020 },
+  ];
+  const fakeRes = detectFakeDiscount(fakeSeries, 1020);
+  assert.equal(fakeRes.status, "fake_discount");
+  assert.equal(fakeRes.tone, "bad");
+  assert.ok(fakeRes.authenticityScore <= 35, `Expected low authenticityScore, got ${fakeRes.authenticityScore}`);
+  assert.equal(fakeRes.metrics.peakPrice, 1450);
+
+  // analyzePriceHistory must cap timingScore <= 45 when fake_discount is triggered!
+  const histWithTrap = analyzePriceHistory(fakeSeries, 1020);
+  assert.equal(histWithTrap.fakeDiscount.status, "fake_discount");
+  assert.ok(histWithTrap.verdict.score <= 45, `Expected timingScore capped <= 45 on fake discount, got ${histWithTrap.verdict.score}`);
+
+  // 2. Partial / exaggerated discount: normal 1000 -> spiked to 1350 -> dropped to 940 (-30% advertised, -6% real)
+  const partialSeries = [
+    { isoDate: "2026-09-01", dateLabel: "01.09.2026", price: 1000 },
+    { isoDate: "2026-09-15", dateLabel: "15.09.2026", price: 1000 },
+    { isoDate: "2026-10-01", dateLabel: "01.10.2026", price: 1000 },
+    { isoDate: "2026-10-20", dateLabel: "20.10.2026", price: 1000 },
+    { isoDate: "2026-11-05", dateLabel: "05.11.2026", price: 1350 },
+    { isoDate: "2026-11-11", dateLabel: "11.11.2026", price: 940 },
+  ];
+  const partialRes = detectFakeDiscount(partialSeries, 940);
+  assert.equal(partialRes.status, "partial_discount");
+  assert.equal(partialRes.tone, "warn");
+
+  // 3. Genuine verified discount: stable ~2000 TL -> genuine drop to 1650 TL (-17.5%)
+  const genuineSeries = [
+    { isoDate: "2026-09-01", dateLabel: "01.09.2026", price: 2000 },
+    { isoDate: "2026-09-20", dateLabel: "20.09.2026", price: 1990 },
+    { isoDate: "2026-10-10", dateLabel: "10.10.2026", price: 2010 },
+    { isoDate: "2026-11-01", dateLabel: "01.11.2026", price: 2000 },
+    { isoDate: "2026-11-20", dateLabel: "20.11.2026", price: 1650 },
+  ];
+  const genuineRes = detectFakeDiscount(genuineSeries, 1650);
+  assert.equal(genuineRes.status, "genuine_discount");
+  assert.equal(genuineRes.tone, "good");
+  assert.ok(genuineRes.authenticityScore >= 85);
+
+  // 4. Currently inflated price (+18% above normal)
+  const inflatedSeries = [
+    { isoDate: "2026-09-01", dateLabel: "01.09.2026", price: 1000 },
+    { isoDate: "2026-10-01", dateLabel: "01.10.2026", price: 1000 },
+    { isoDate: "2026-11-01", dateLabel: "01.11.2026", price: 1020 },
+    { isoDate: "2026-11-20", dateLabel: "20.11.2026", price: 1180 },
+  ];
+  const inflatedRes = detectFakeDiscount(inflatedSeries, 1180);
+  assert.equal(inflatedRes.status, "inflated");
+
+  // 5. No-history cross-store checks (inflated list price vs market median, and genuine market deal)
+  const inflatedList = detectFakeDiscount([], 1000, { marketMedian: 1000, listPrice: 1450 });
+  assert.equal(inflatedList.status, "fake_discount");
+
+  const marketDeal = detectFakeDiscount([], 820, { marketMedian: 1000 });
+  assert.equal(marketDeal.status, "market_deal");
+  assert.equal(marketDeal.tone, "good");
+});
+
+test("suggestWatchlistFolder & summarizeWatchlistBudget + DB folder/budget persistence work cleanly", () => {
+  assert.equal(suggestWatchlistFolder("Apple iPhone 17 Pro 256 GB"), "Teknoloji");
+  assert.equal(suggestWatchlistFolder("Stradivarius Siyah Poplin Gömlek"), "Giyim & Ayakkabı");
+  assert.equal(suggestWatchlistFolder("Zara Vibrant Leather EDP 100 ml Parfüm"), "Parfüm & Kozmetik");
+  assert.equal(suggestWatchlistFolder("Philips Airfryer XXL Fritöz"), "Ev & Mutfak");
+  assert.equal(suggestWatchlistFolder("Lavazza Çekirdek Kahve 1 kg"), "Market");
+  assert.equal(suggestWatchlistFolder("Özel Koleksiyon Objesi"), "Diğer");
+
+  const budget = summarizeWatchlistBudget(
+    [
+      {
+        id: "b1",
+        folder: "Teknoloji",
+        initial_net_price: 50000,
+        last_net_price: 46000,
+        target_price: 47000,
+      },
+      {
+        id: "b2",
+        folder: "Giyim & Ayakkabı",
+        initial_net_price: 1500,
+        last_net_price: 1700,
+        target_price: 1300,
+      },
+    ],
+    ""
+  );
+  assert.equal(budget.currentTotal, 47700);
+  assert.equal(budget.initialTotal, 51500);
+  assert.equal(budget.targetTotal, 48300);
+  assert.equal(budget.netDelta, -3800);
+  assert.equal(budget.targetHits, 1);
+  assert.equal(budget.folders.length, 2);
+
+  const scopedTech = summarizeWatchlistBudget(
+    [
+      { id: "b1", folder: "Teknoloji", initial_net_price: 50000, last_net_price: 46000, target_price: 47000 },
+      { id: "b2", folder: "Giyim & Ayakkabı", initial_net_price: 1500, last_net_price: 1700, target_price: 1300 },
+    ],
+    "Teknoloji"
+  );
+  assert.equal(scopedTech.count, 1);
+  assert.equal(scopedTech.currentTotal, 46000);
+
+  // DB round-trip test with guaranteed cleanup
+  const testId = `__test_v8_${Date.now()}`;
+  try {
+    upsertWatchlistItem({
+      id: testId,
+      title: "Stradivarius Test Gömlek",
+      url: `https://example.com/${testId}`,
+      folder: "Giyim & Ayakkabı",
+      target_price: 900,
+      last_net_price: 1200,
+      fake_discount_status: "fake_discount",
+      fake_discount_label: "⚠ Sahte İndirim Riski",
+    });
+
+    // Update price down -> initial_net_price MUST remain 1200 so net delta is -350 TL!
+    upsertWatchlistItem({
+      id: testId,
+      title: "Stradivarius Test Gömlek",
+      url: `https://example.com/${testId}`,
+      last_net_price: 850,
+    });
+
+    updateWatchlistItem(testId, { folder: "Çeyiz" });
+    const row = getWatchlist().find((w) => w.id === testId);
+    assert.ok(row);
+    assert.equal(row.folder, "Çeyiz");
+    assert.equal(row.initial_net_price, 1200);
+    assert.equal(row.last_net_price, 850);
+    assert.equal(row.priceChangeFromInitial, -350);
+    assert.equal(row.targetReached, true);
+    assert.equal(row.fake_discount_status, "fake_discount");
+  } finally {
+    removeWatchlistItem(testId);
+  }
+});
+
+test("Second-hand detection (Dolap, Gardrops, sahibinden) classifies conditions, isolates retail median, and provides quick links", async () => {
+  assert.equal(isSecondHandOffer("https://dolap.com/urun/stradivarius-siyah-gomlek-12345678", "Stradivarius Gömlek"), true);
+  assert.equal(isSecondHandOffer("https://www.gardrops.com/kadin/stradivarius-gomlek-98765432", "Stradivarius Gömlek"), true);
+  assert.equal(isSecondHandOffer("https://www.sahibinden.com/ilan/ikinci-el-ve-sifir-alisveris-123456789/detay", "iPhone 15"), true);
+  assert.equal(isSecondHandOffer("https://www.trendyol.com/stradivarius/siyah-gomlek-p-12345", "Stradivarius Gömlek"), false);
+
+  assert.equal(detectSecondHandCondition("Stradivarius Siyah Gömlek Yeni Etiketli", ""), "Yeni & Etiketli");
+  assert.equal(detectSecondHandCondition("Zara Ceket", "Sadece 1 kez giyildi, tertemiz"), "Az Kullanılmış");
+  assert.equal(detectSecondHandCondition("iPhone 14 Yenilenmiş 128 GB", ""), "Yenilenmiş");
+  assert.equal(detectSecondHandCondition("Stradivarius Gömlek M Beden", ""), "2. El");
+
+  // Direct listing vs product page URL classification for Dolap, Gardrops & sahibinden
+  assert.equal(classifyStoreUrl("https://dolap.com/urun/stradivarius-gomlek-123456").isProductPage, true);
+  assert.equal(classifyStoreUrl("https://dolap.com/ara?q=stradivarius+gomlek").isListingPage, true);
+  assert.equal(classifyStoreUrl("https://www.gardrops.com/kadin/stradivarius-gomlek-98765432").isProductPage, true);
+  assert.equal(classifyStoreUrl("https://www.gardrops.com/ara?q=stradivarius").isListingPage, true);
+  assert.equal(classifyStoreUrl("https://www.sahibinden.com/ilan/ikinci-el-telefon-1122334455/detay").isProductPage, true);
+  assert.equal(classifyStoreUrl("https://www.sahibinden.com/kelime-ile-arama?query_text=iphone").isListingPage, true);
+
+  // Retail isolation: Dolap 450 TL offer must NOT distort brand-new Trendyol/Stradivarius retail median (~1500 TL)!
+  const mixedOrganic = [
+    {
+      title: "Stradivarius Siyah Poplin Gömlek Yeni Etiketli - Dolap",
+      link: "https://dolap.com/urun/stradivarius-siyah-poplin-gomlek-99887766",
+      snippet: "Yeni ve etiketli Stradivarius siyah gömlek. 450,00 TL.",
+    },
+    {
+      title: "Stradivarius Siyah Poplin Gömlek - Trendyol",
+      link: "https://www.trendyol.com/stradivarius/siyah-poplin-gomlek-p-11122233",
+      snippet: "Stradivarius Siyah Poplin Gömlek. 1.490,00 TL. Ücretsiz Kargo.",
+    },
+    {
+      title: "Stradivarius Siyah Poplin Gömlek - Hepsiburada",
+      link: "https://www.hepsiburada.com/stradivarius-siyah-poplin-gomlek-p-HBCV0000999",
+      snippet: "Stradivarius Siyah Poplin Gömlek. 1.590,00 TL. Ücretsiz Kargo.",
+    },
+  ];
+  const resp = buildTurkeySearchResponse("stradivarius siyah poplin gömlek", mixedOrganic, [], "Google Türkiye", "serper");
+  const dolapCard = resp.products.find((p) => p.externalUrl?.includes("dolap.com"));
+  const allCard = resp.products.find((p) => p.badge === "Tüm Mağazalar");
+  assert.ok(dolapCard);
+  assert.equal(dolapCard.isSecondHand, true);
+  assert.equal(dolapCard.secondHandCondition, "Yeni & Etiketli");
+  // Aggregate retail card MUST start at 1.490 TL (retail), NOT 450 TL (Dolap 2. El)!
+  assert.ok(allCard);
+  assert.equal(allCard.lowestPrice, 1490);
+
+  // QuickLinks & zero-key searchSecondHandTurkey behavior
+  const links = buildSecondHandQuickLinks("stradivarius gömlek");
+  assert.equal(links.length, 3);
+  assert.ok(links.some((l) => l.platform === "Dolap" && l.url.includes("dolap.com")));
+  assert.ok(links.some((l) => l.platform === "Gardrops" && l.url.includes("gardrops.com")));
+  assert.ok(links.some((l) => l.platform === "sahibinden" && l.url.includes("sahibinden.com")));
+
+  const zeroKeyRes = await searchSecondHandTurkey("stradivarius gömlek", { serperKey: "", serpApiKey: "" });
+  assert.equal(zeroKeyRes.quickLinks.length, 3);
+  assert.equal(zeroKeyRes.liveIndexed, false);
+});
+
 

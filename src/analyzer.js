@@ -277,21 +277,280 @@ function pickSummary(o) {
 }
 
 /**
+ * Campaign / Fake-Discount Detector ("Sahte İndirim & Fiyat Şişirme Dedektörü").
+ * Detects pre-campaign "bindirim → indirim" spikes (e.g. 11.11 / Efsane Cuma),
+ * exaggerated discounts, genuine verified discounts, and inflated list prices.
+ *
+ * @param {Array<{isoDate?: string, dateLabel?: string, price: number}>} rawPoints
+ * @param {number|null} currentNetPrice
+ * @param {{ marketMedian?: number|null, listPrice?: number|null }} [options]
+ */
+export function detectFakeDiscount(rawPoints, currentNetPrice, options = {}) {
+  const points = [...(rawPoints || [])]
+    .filter((p) => p && typeof p.price === "number" && Number.isFinite(p.price) && p.price > 0)
+    .sort((a, b) => String(a.isoDate || "").localeCompare(String(b.isoDate || "")));
+
+  const latestPrice =
+    typeof currentNetPrice === "number" && Number.isFinite(currentNetPrice) && currentNetPrice > 0
+      ? currentNetPrice
+      : points.length
+        ? points[points.length - 1].price
+        : null;
+
+  const marketMedian =
+    typeof options?.marketMedian === "number" && Number.isFinite(options.marketMedian) && options.marketMedian > 0
+      ? options.marketMedian
+      : null;
+  const listPrice =
+    typeof options?.listPrice === "number" && Number.isFinite(options.listPrice) && options.listPrice > 0
+      ? options.listPrice
+      : null;
+
+  // Case 1: Insufficient historical series (< 2 points) -> cross-store market check
+  if (points.length < 2 || !latestPrice) {
+    if (latestPrice && marketMedian && listPrice && listPrice >= marketMedian * 1.15 && latestPrice >= marketMedian * 0.98) {
+      const fakeCutPct = round2(((listPrice - latestPrice) / listPrice) * 100);
+      const vsMarketPct = round2(((latestPrice - marketMedian) / marketMedian) * 100);
+      return {
+        status: "fake_discount",
+        tone: "warn",
+        authenticityScore: 28,
+        label: "⚠ Şişirilmiş Liste Fiyatı",
+        headline: `Üstü çizili liste fiyatı (${formatTrNumber(listPrice)} TL) piyasa medyanının oldukça üzerinde.`,
+        details: [
+          `Liste fiyatına göre %${formatTrNumber(fakeCutPct)} indirim görünse de güncel fiyat piyasa medyanına (${formatTrNumber(marketMedian)} TL) göre ${vsMarketPct >= 0 ? `+%${formatTrNumber(vsMarketPct)} yukarıda` : `yalnızca %${formatTrNumber(Math.abs(vsMarketPct))} aşağıda`}.`,
+          "Ürünü takibe aldığınızda zaman içindeki fiyat şişirmelerini otomatik olarak yakalarız.",
+        ],
+        metrics: {
+          normalPrice: marketMedian,
+          peakPrice: listPrice,
+          peakDate: "Liste fiyatı",
+          currentPrice: latestPrice,
+          spikePct: round2(((listPrice - marketMedian) / marketMedian) * 100),
+          apparentDropPct: fakeCutPct,
+          realDiffPct: vsMarketPct,
+        },
+        hasHistory: false,
+      };
+    }
+
+    if (latestPrice && marketMedian && latestPrice <= marketMedian * 0.9) {
+      const savePct = round2(((marketMedian - latestPrice) / marketMedian) * 100);
+      const saveTl = round2(marketMedian - latestPrice);
+      return {
+        status: "market_deal",
+        tone: "good",
+        authenticityScore: Math.min(92, Math.round(74 + savePct)),
+        label: "✓ Piyasa Medyanının Altında",
+        headline: `Rakip mağaza medyanına (${formatTrNumber(marketMedian)} TL) göre %${formatTrNumber(savePct)} (${formatTrNumber(saveTl)} TL) avantajlı.`,
+        details: [
+          "Tarihsel seri henüz birikmedi; ancak anlık çoklu mağaza dağılımına göre rekabetçi bir fiyat.",
+          "Takip listesine ekleyerek kampanya dönemlerindeki fiyat şişirmelerini otomatik denetleyebilirsiniz.",
+        ],
+        metrics: {
+          normalPrice: marketMedian,
+          peakPrice: null,
+          peakDate: "",
+          currentPrice: latestPrice,
+          spikePct: 0,
+          apparentDropPct: savePct,
+          realDiffPct: -savePct,
+        },
+        hasHistory: false,
+      };
+    }
+
+    return {
+      status: "insufficient_history",
+      tone: "neutral",
+      authenticityScore: null,
+      label: "Geçmiş Veri Birikiyor",
+      headline: "Sahte indirim analizi için en az 2 tarihli fiyat kaydı gerekiyor.",
+      details: [
+        "Ürünü takibe alıp zaman zaman güncellediğinizde kampanya öncesi zam → indirim tuzaklarını otomatik yakalarız.",
+      ],
+      metrics: null,
+      hasHistory: false,
+    };
+  }
+
+  // Case 2: Analyze chronological price series (Akakçe 6-month history OR personal snapshots)
+  // Ensure latestPrice is evaluated as the terminal point
+  const series = [...points];
+  const lastPt = series[series.length - 1];
+  if (Math.abs(lastPt.price - latestPrice) > 0.01) {
+    series.push({
+      isoDate: new Date().toISOString(),
+      dateLabel: "Bugün",
+      price: latestPrice,
+    });
+  }
+
+  const allSorted = series.map((p) => p.price).sort((a, b) => a - b);
+  const overallMedian = round2(quantile(allSorted, 0.5));
+
+  // Recent window: last 30 points or ~45% of shorter series (minimum 2 points)
+  const recentLen = Math.min(30, Math.max(2, Math.ceil(series.length * 0.45)));
+  const recentStartIdx = Math.max(1, series.length - recentLen);
+
+  // Find peak inside recent window (excluding the very first point so a pre-peak baseline exists)
+  let peakIdx = recentStartIdx;
+  for (let i = recentStartIdx; i < series.length; i++) {
+    if (series[i].price > series[peakIdx].price) {
+      peakIdx = i;
+    }
+  }
+  const recentPeak = series[peakIdx];
+
+  // Normal pre-peak baseline: median of points strictly before peakIdx (fallback to earlier half or overallMedian)
+  const prePeakSlice = series.slice(0, peakIdx).map((p) => p.price).sort((a, b) => a - b);
+  const earlySlice = series.slice(0, Math.max(1, Math.floor(series.length * 0.65))).map((p) => p.price).sort((a, b) => a - b);
+  const normalPrice = round2(
+    prePeakSlice.length >= 2
+      ? quantile(prePeakSlice, 0.5)
+      : prePeakSlice.length === 1
+        ? prePeakSlice[0]
+        : quantile(earlySlice, 0.5) || overallMedian
+  );
+
+  const spikePct = normalPrice > 0 ? round2(((recentPeak.price - normalPrice) / normalPrice) * 100) : 0;
+  const apparentDropPct = recentPeak.price > 0 ? round2(((recentPeak.price - latestPrice) / recentPeak.price) * 100) : 0;
+  const realDiffPct = normalPrice > 0 ? round2(((latestPrice - normalPrice) / normalPrice) * 100) : 0;
+  const diffVsOverallMedianPct = overallMedian > 0 ? round2(((latestPrice - overallMedian) / overallMedian) * 100) : 0;
+
+  const metrics = {
+    normalPrice,
+    peakPrice: recentPeak.price,
+    peakDate: recentPeak.dateLabel || recentPeak.isoDate?.slice(0, 10) || "",
+    currentPrice: latestPrice,
+    overallMedian,
+    spikePct,
+    apparentDropPct,
+    realDiffPct,
+  };
+
+  // Pattern 1: Classic "Bindirim → İndirim" Fake Discount Trap!
+  // Price jumped >= 10% above normal baseline, then "dropped" >= 5% from that peak,
+  // yet current price is still >= normalPrice * 0.98 (no real discount vs pre-spike normal!)
+  if (spikePct >= 10 && apparentDropPct >= 5 && realDiffPct >= -2) {
+    const score = Math.max(
+      8,
+      Math.min(35, Math.round(32 - Math.max(0, realDiffPct) * 1.4 - Math.max(0, spikePct - 10) * 0.35))
+    );
+    const diffLabel =
+      realDiffPct > 0.5
+        ? `normal fiyatın hâlâ +%${formatTrNumber(realDiffPct)} üzerinde`
+        : "aslında eski normal fiyatıyla neredeyse aynı seviyede";
+    return {
+      status: "fake_discount",
+      tone: "bad",
+      authenticityScore: score,
+      label: "⚠ Sahte İndirim Riski",
+      headline: `Önce %${formatTrNumber(spikePct)} zamlanıp ardından %${formatTrNumber(apparentDropPct)} indirilmiş; ${diffLabel}.`,
+      details: [
+        `Önceki normal fiyat medyanı ${formatTrNumber(normalPrice)} TL iken ${metrics.peakDate || "yakın dönemde"} ${formatTrNumber(recentPeak.price)} TL'ye (+%${formatTrNumber(spikePct)}) yükselmiş.`,
+        `Zirveden %${formatTrNumber(apparentDropPct)} düşmüş gibi görünse de güncel ${formatTrNumber(latestPrice)} TL fiyatı ${diffLabel}.`,
+        "Kampanya etiketi yanıltıcı olabilir; acil değilse gerçek dip seviye için beklemek daha mantıklı.",
+      ],
+      metrics,
+      hasHistory: true,
+    };
+  }
+
+  // Pattern 2: Exaggerated / Partial Discount (spiked first, real savings exist but much smaller than advertised!)
+  if (spikePct >= 10 && apparentDropPct >= 8 && realDiffPct < -2 && apparentDropPct >= Math.abs(realDiffPct) * 1.7) {
+    const realSaveTl = round2(normalPrice - latestPrice);
+    const score = Math.max(45, Math.min(68, Math.round(52 + Math.abs(realDiffPct) * 1.2)));
+    return {
+      status: "partial_discount",
+      tone: "warn",
+      authenticityScore: score,
+      label: "⚡ Abartılı İndirim (Kısmi Fırsat)",
+      headline: `Zirveye göre %${formatTrNumber(apparentDropPct)} indirim görünse de gerçek indirim %${formatTrNumber(Math.abs(realDiffPct))}.`,
+      details: [
+        `Fiyat normal medyan olan ${formatTrNumber(normalPrice)} TL'den ${formatTrNumber(recentPeak.price)} TL'ye (+%${formatTrNumber(spikePct)}) çıkıp ${formatTrNumber(latestPrice)} TL'ye gerilemiş.`,
+        `Yine de normal fiyata kıyasla ${formatTrNumber(realSaveTl)} TL (%${formatTrNumber(Math.abs(realDiffPct))}) gerçek bir avantaj mevcut.`,
+      ],
+      metrics,
+      hasHistory: true,
+    };
+  }
+
+  // Pattern 3: Genuine Verified Discount (clearly below both prior normal baseline and overall median)
+  if (realDiffPct <= -5 && diffVsOverallMedianPct <= -3.5) {
+    const realSaveTl = round2(normalPrice - latestPrice);
+    const score = Math.min(99, Math.round(78 + Math.min(20, Math.abs(realDiffPct) * 1.15)));
+    return {
+      status: "genuine_discount",
+      tone: "good",
+      authenticityScore: score,
+      label: "✓ Gerçek İndirim Doğrulandı",
+      headline: `Önceki normal piyasa medyanına (${formatTrNumber(normalPrice)} TL) göre gerçek %${formatTrNumber(Math.abs(realDiffPct))} (${formatTrNumber(realSaveTl)} TL) indirim var.`,
+      details: [
+        `Kampanya öncesi yapay fiyat şişirmesi tespit edilmedi; tüm dönem medyanının (${formatTrNumber(overallMedian)} TL) %${formatTrNumber(Math.abs(diffVsOverallMedianPct))} altında.`,
+        "Tarihsel veriler gerçek bir fırsat dönemine işaret ediyor.",
+      ],
+      metrics,
+      hasHistory: true,
+    };
+  }
+
+  // Pattern 4: Inflated / Pre-Campaign Price Spike currently underway
+  if (realDiffPct >= 8 || diffVsOverallMedianPct >= 10) {
+    const overPct = Math.max(realDiffPct, diffVsOverallMedianPct);
+    const score = Math.max(12, Math.min(42, Math.round(42 - overPct * 0.9)));
+    return {
+      status: "inflated",
+      tone: "bad",
+      authenticityScore: score,
+      label: "↑ Fiyat Şişirmesi (Bekleyin)",
+      headline: `Güncel fiyat normal piyasa medyanının (${formatTrNumber(normalPrice)} TL) +%${formatTrNumber(overPct)} üzerinde.`,
+      details: [
+        "Yakın dönemdeki sert yükseliş, olası bir kampanya öncesi fiyat şişirmesi (bindirim) olabilir.",
+        "Acil değilse takip listesine ekleyip normal fiyat bandına dönüşünü beklemeniz önerilir.",
+      ],
+      metrics,
+      hasHistory: true,
+    };
+  }
+
+  // Pattern 5: Normal Stable Market Trajectory
+  return {
+    status: "stable",
+    tone: "neutral",
+    authenticityScore: 70,
+    label: "• Normal Piyasa Seyri",
+    headline: `Güncel fiyat normal medyanına (${formatTrNumber(normalPrice)} TL) paralel seyrediyor (${realDiffPct >= 0 ? "+" : ""}%${formatTrNumber(realDiffPct)}).`,
+    details: [
+      "Önce zam sonra indirim şeklinde bir fiyat manipülasyonu tespit edilmedi.",
+      "İhtiyacınız varsa güvenle alınabilir veya indirim için hedef fiyat alarmı kurulabilir.",
+    ],
+    metrics,
+    hasHistory: true,
+  };
+}
+
+/**
  * Analyzes 6-month real historical price series to produce:
  * - Moving averages, min/max dates, 30d/90d/180d averages
  * - Buy Timing Score (0-100) & "Şimdi Alınır mı?" verdict
- * - Fake-discount / price-spike warnings
+ * - Campaign / Fake-discount ("sahte indirim") detection
  */
-export function analyzePriceHistory(rawHistory, currentNetPrice, fallbackHistoricalLow = null) {
+export function analyzePriceHistory(rawHistory, currentNetPrice, fallbackHistoricalLow = null, marketStats = null) {
   // Sort chronologically oldest -> newest
   const points = [...(rawHistory || [])]
     .filter((p) => p && p.isoDate && typeof p.price === "number" && p.price > 0)
     .sort((a, b) => a.isoDate.localeCompare(b.isoDate));
 
   if (!points.length) {
+    const fakeDiscount = detectFakeDiscount([], currentNetPrice, {
+      marketMedian: marketStats?.medianNet ?? null,
+      listPrice: marketStats?.listPrice ?? null,
+    });
     return {
       points: [],
       summary: null,
+      fakeDiscount,
       verdict: {
         score: 65,
         label: "Fiyat Geçmişi Sınırlı",
@@ -353,14 +612,31 @@ export function analyzePriceHistory(rawHistory, currentNetPrice, fallbackHistori
   const variance = allPrices.reduce((s, v) => s + (v - avgAll) ** 2, 0) / allPrices.length;
   const volatilityPct = avgAll > 0 ? round2((Math.sqrt(variance) / avgAll) * 100) : 0;
 
+  // Run Campaign / Fake-Discount Detector
+  const fakeDiscount = detectFakeDiscount(enrichedPoints, latestPrice, {
+    marketMedian: marketStats?.medianNet ?? null,
+    listPrice: marketStats?.listPrice ?? null,
+  });
+
   // Timing Score (0-100): Higher = better time to buy
   // Base on position in historical range (55 pts) + vs 30d avg (30 pts) + 7d momentum (15 pts)
   const rangePts = (1 - positionInRange) * 55;
   const avg30Pts = Math.max(0, Math.min(30, 15 - diffFromAvg30Pct * 1.6));
   const momentumPts = Math.max(0, Math.min(15, 7.5 - change7dPct * 1.1));
-  const timingScore = Math.max(5, Math.min(99, Math.round(rangePts + avg30Pts + momentumPts)));
+  let timingScore = Math.max(5, Math.min(99, Math.round(rangePts + avg30Pts + momentumPts)));
+
+  // Cap overly optimistic timing score if a fake-discount spike was caught!
+  if (fakeDiscount.status === "fake_discount") {
+    timingScore = Math.min(timingScore, 45);
+  }
 
   const reasons = [];
+  if (fakeDiscount.status === "fake_discount") {
+    reasons.push(`⚠ Sahte İndirim Radarı: ${fakeDiscount.headline}`);
+  } else if (fakeDiscount.status === "genuine_discount") {
+    reasons.push(`✓ Gerçek İndirim: ${fakeDiscount.headline}`);
+  }
+
   if (diffFromMinPct <= 2) {
     reasons.push(`Güncel fiyat son ${enrichedPoints.length} günün taban seviyesine çok yakın (en düşük: ${formatTrNumber(minPoint.price)} TL, ${minPoint.dateLabel}).`);
   } else {
@@ -425,6 +701,7 @@ export function analyzePriceHistory(rawHistory, currentNetPrice, fallbackHistori
       volatilityPct,
       positionInRangePct: Math.round(positionInRange * 100),
     },
+    fakeDiscount,
     verdict: {
       score: timingScore,
       label,
@@ -434,3 +711,4 @@ export function analyzePriceHistory(rawHistory, currentNetPrice, fallbackHistori
     },
   };
 }
+

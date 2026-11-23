@@ -116,6 +116,18 @@ const DOMAIN_STORE_MAP = [
   ["dolap.com", "Dolap"],
   ["gardrops.com", "Gardrops"],
   ["sahibinden.com", "sahibinden"],
+  ["letgo.com", "Letgo"],
+  ["modacruz.com", "ModaCruz"],
+  ["zebramo.com", "Zebramo"],
+];
+
+const SECOND_HAND_DOMAINS = [
+  "dolap.com",
+  "gardrops.com",
+  "sahibinden.com",
+  "letgo.com",
+  "modacruz.com",
+  "zebramo.com",
 ];
 
 // Non-shopping informational / social domains to exclude from store offers
@@ -353,6 +365,29 @@ export function classifyStoreUrl(urlStr, title = "") {
     return { isProductPage: false, isListingPage: true, productId: null, slug };
   }
 
+  // 10b. Second-hand marketplaces (Dolap, Gardrops, sahibinden)
+  if (host === "dolap.com" || host.endsWith(".dolap.com")) {
+    const m = pathname.match(/\/urun\/[^/]+-(\d{5,})(?:\/|$)/i);
+    if (m || /\/urun\//i.test(pathname)) {
+      return { isProductPage: true, isListingPage: false, productId: m ? `dolap:${m[1]}` : null, slug };
+    }
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+  if (host === "gardrops.com" || host.endsWith(".gardrops.com")) {
+    const m = pathname.match(/-(\d{6,})(?:\/|$)/i);
+    if (m && !LISTING_PATH_RE.test(pathname)) {
+      return { isProductPage: true, isListingPage: false, productId: `gardrops:${m[1]}`, slug };
+    }
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+  if (host === "sahibinden.com" || host.endsWith(".sahibinden.com")) {
+    const m = pathname.match(/\/ilan\/[^/]+-(\d{7,})\/detay/i) || pathname.match(/\/ilan\/[^/]+-(\d{7,})/i);
+    if (m || /\/ilan\//i.test(pathname)) {
+      return { isProductPage: true, isListingPage: false, productId: m ? `shb:${m[1]}` : null, slug };
+    }
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+
   // 11. Universal fallback checks for other stores
   const hasSearchQueryParam = SEARCH_QUERY_PARAMS.some((k) => u.searchParams.has(k));
   if (hasSearchQueryParam || LISTING_PATH_RE.test(pathname)) {
@@ -380,6 +415,40 @@ export function classifyStoreUrl(urlStr, title = "") {
   }
 
   return { isProductPage: true, isListingPage: false, productId: null, slug };
+}
+
+/**
+ * Checks whether a listing belongs to a Turkish second-hand / tagged resale platform
+ * (Dolap, Gardrops, sahibinden, Letgo, ModaCruz) or explicitly states 2nd-hand condition.
+ */
+export function isSecondHandOffer(urlStr, title = "") {
+  try {
+    const host = new URL(urlStr).hostname.replace(/^www\.|^m\./i, "").toLowerCase();
+    if (SECOND_HAND_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`))) {
+      return true;
+    }
+  } catch {
+    // Ignore invalid URL
+  }
+  const norm = transliterateTr(String(title || "")).toLowerCase();
+  return /\b(2\.\s*el|ikinci\s+el|yenilenmis|refurbished|az\s+kullanilmis|kullanilmis)\b/i.test(norm);
+}
+
+/**
+ * Detects condition label for second-hand / tagged resale listings.
+ */
+export function detectSecondHandCondition(title = "", snippet = "") {
+  const norm = transliterateTr(`${title} ${snippet}`).toLowerCase();
+  if (/\b(yeni\s*(ve|&)?\s*etiketli|sifir\s*etiketli|etiketli|hic\s+kullanilmadi|kullanilmamis|etiketi\s+uzerinde)\b/i.test(norm)) {
+    return "Yeni & Etiketli";
+  }
+  if (/\b(az\s+kullanilmis|1\s*kez|bir\s*kez|tertemiz|sifir\s+ayarinda|yeni\s+gibi)\b/i.test(norm)) {
+    return "Az Kullanılmış";
+  }
+  if (/\b(yenilenmis|refurbished)\b/i.test(norm)) {
+    return "Yenilenmiş";
+  }
+  return "2. El";
 }
 
 /**
@@ -1166,6 +1235,8 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
     const vKey = `virtual:${prefix}:${encodeURIComponent(query)}:${idx}`;
     const sellerCountMatch = snippet.match(/(?:\+(\d+)\s*FİYAT|(\d+)\s*satıcı)/i);
     const offerCountHint = sellerCountMatch ? Number.parseInt(sellerCountMatch[1] || sellerCountMatch[2], 10) : 1;
+    const isSecondHand = isSecondHandOffer(link, title);
+    const secondHandCondition = isSecondHand ? detectSecondHandCondition(title, snippet) : null;
 
     // Only direct single-product pages with a verified cash price become priced product offers!
     if (!urlClass.isListingPage && priceInfo.price !== null && priceInfo.price > 0) {
@@ -1176,7 +1247,7 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
         shipping: priceInfo.shipping,
         store,
         storeLogo: storeMeta.logoUrl,
-        stockText: /tükendi|stokta yok/i.test(snippet) ? "Stok kontrol edin" : "Stokta",
+        stockText: /tükendi|stokta yok/i.test(snippet) ? "Stok kontrol edin" : isSecondHand ? secondHandCondition : "Stokta",
         inStock: !/tükendi|stokta yok/i.test(snippet),
         delivery,
         lastUpdated: item.date || "Canlı Google TR",
@@ -1190,6 +1261,8 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
         isDirectLink: true,
         isProductPage: true,
         isListingPage: false,
+        isSecondHand,
+        secondHandCondition,
         isAccessory,
         image: matchedPhoto,
         variantAttrs,
@@ -1210,11 +1283,13 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
         offerCount: offerCountHint,
         badge: storeMeta.platform,
         source: storeMeta.platform,
-        isOfficialStore: store.isOfficialSeller || store.trustScore >= 0.92,
+        isOfficialStore: !isSecondHand && (store.isOfficialSeller || store.trustScore >= 0.92),
         isFreeShipping: Boolean(priceInfo.shipping?.isFree),
         isAccessory,
         isProductPage: true,
         isListingPage: false,
+        isSecondHand,
+        secondHandCondition,
         variantAttrs,
         unitInfo,
         _offer: offer,
@@ -1225,10 +1300,12 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
         title,
         url: link,
         store: storeMeta.platform,
-        isOfficialStore: store.isOfficialSeller || store.trustScore >= 0.92,
+        isOfficialStore: !isSecondHand && (store.isOfficialSeller || store.trustScore >= 0.92),
         isAccessory,
         isProductPage: urlClass.isProductPage,
         isListingPage: urlClass.isListingPage,
+        isSecondHand,
+        secondHandCondition,
         variantAttrs,
         logoUrl: storeMeta.logoUrl,
         image: matchedPhoto || storeMeta.logoUrl || (variantAttrs.color ? "" : defaultProductImage),
@@ -1237,13 +1314,21 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
     }
   }
 
-  // Prefer non-accessory offers for the main multi-store aggregate comparison
-  const primaryOffers = pricedOffers.filter((o) => !o.isAccessory);
-  const analysisPool = primaryOffers.length >= 2 ? primaryOffers : pricedOffers;
+  // Prefer brand-new, non-accessory offers for the main multi-store retail comparison
+  const retailPrimaryOffers = pricedOffers.filter((o) => !o.isAccessory && !o.isSecondHand);
+  const nonAccessoryOffers = pricedOffers.filter((o) => !o.isAccessory);
+  const analysisPool =
+    retailPrimaryOffers.length >= 2
+      ? retailPrimaryOffers
+      : retailPrimaryOffers.length === 1
+        ? retailPrimaryOffers
+        : nonAccessoryOffers.length >= 2
+          ? nonAccessoryOffers
+          : pricedOffers;
 
   const unitInfoGlobal = extractUnitInfo(query, analysisPool[0]?.basePrice ?? null);
   const analysis = analyzeOffers(analysisPool, unitInfoGlobal);
-  const histAnalysis = analyzePriceHistory([], analysis.stats?.minNet ?? null);
+  const histAnalysis = analyzePriceHistory([], analysis.stats?.minNet ?? null, null, analysis.stats);
 
   const aggregateKey = `virtual:${prefix}:all:${encodeURIComponent(query.toLocaleLowerCase("tr-TR"))}`;
   const bestImage =
@@ -1286,6 +1371,7 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
     offers: analysis.offers,
     history: [],
     historySummary: null,
+    fakeDiscount: histAnalysis.fakeDiscount,
     verdict: {
       ...histAnalysis.verdict,
       score: analysis.stats ? (analysis.stats.savingsVsMedianPct >= 15 ? 82 : analysis.stats.savingsVsMedianPct >= 6 ? 72 : 64) : 60,
@@ -1491,6 +1577,8 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
       isAccessory: c.isAccessory,
       isProductPage: c.isProductPage,
       isListingPage: c.isListingPage,
+      isSecondHand: c.isSecondHand,
+      secondHandCondition: c.secondHandCondition,
       variantAttrs: c.variantAttrs,
       unitInfo: null,
     };
@@ -1519,6 +1607,8 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
             isAccessory: false,
             isProductPage: true,
             isListingPage: false,
+            isSecondHand: false,
+            secondHandCondition: null,
             unitInfo: aggregateDetail.unitInfo,
           },
         ]
@@ -1537,10 +1627,260 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
     pricedFound: pricedOffers.length,
     directProductCount: products.length,
     listingCount: catalogCards.filter((c) => c.isListingPage).length,
+    secondHandCount: finalProducts.filter((p) => p.isSecondHand).length,
     accessoryCount: finalProducts.filter((p) => p.isAccessory).length,
     products: finalProducts,
     aggregateUrl: analysisPool.length >= 2 ? aggregateKey : null,
   };
+}
+
+// 5-minute cache for dedicated second-hand (Dolap / Gardrops / sahibinden) searches
+const secondHandCache = new Map();
+
+/**
+ * Builds direct 1-tap search links for Turkey's top second-hand / tagged resale platforms.
+ */
+export function buildSecondHandQuickLinks(query) {
+  const q = String(query || "").trim();
+  const enc = encodeURIComponent(q);
+  return [
+    {
+      platform: "Dolap",
+      label: "Dolap'ta Ara (Yeni & Etiketli / 2. El)",
+      url: `https://dolap.com/ara?q=${enc}`,
+      logoUrl: "https://www.google.com/s2/favicons?domain=dolap.com&sz=64",
+    },
+    {
+      platform: "Gardrops",
+      label: "Gardrops'ta Ara (2. El / Etiketli)",
+      url: `https://www.gardrops.com/ara?q=${enc}`,
+      logoUrl: "https://www.google.com/s2/favicons?domain=gardrops.com&sz=64",
+    },
+    {
+      platform: "sahibinden",
+      label: "sahibinden'de Ara",
+      url: `https://www.sahibinden.com/kelime-ile-arama?query_text=${enc}`,
+      logoUrl: "https://www.google.com/s2/favicons?domain=sahibinden.com&sz=64",
+    },
+  ];
+}
+
+/**
+ * Dedicated Second-Hand & Tagged Resale search engine (Dolap, Gardrops, sahibinden).
+ * Uses Serper or SerpAPI when configured, and always provides direct 1-tap platform links.
+ */
+export async function searchSecondHandTurkey(query, options = {}) {
+  const q = String(query || "").trim();
+  if (!q) {
+    throw new Error("Arama terimi boş olamaz.");
+  }
+
+  const quickLinks = buildSecondHandQuickLinks(q);
+  const serperKey = (options.serperKey || process.env.SERPER_API_KEY || "").trim();
+  const serpApiKey = (options.serpApiKey || process.env.SERPAPI_KEY || "").trim();
+  const cacheKey = `2el:${q.toLocaleLowerCase("tr-TR")}:${serperKey ? "sp" : serpApiKey ? "sa" : "none"}`;
+
+  if (!options.refresh) {
+    const cached = secondHandCache.get(cacheKey);
+    if (cached && Date.now() <= cached.expiresAt) {
+      return { ...cached.data, cached: true };
+    }
+  }
+
+  if (!serperKey && !serpApiKey) {
+    return {
+      query: q,
+      provider: "Doğrudan 2. El Bağlantıları",
+      liveIndexed: false,
+      fetchedAt: new Date().toISOString(),
+      cached: false,
+      totalFound: 0,
+      pricedFound: 0,
+      lowestPrice: null,
+      items: [],
+      quickLinks,
+      notice:
+        "Canlı Dolap / Gardrops / sahibinden ilan fiyatlarını uygulama içinde listelemek için Ayarlar'dan ücretsiz Serper API anahtarı ekleyebilir veya aşağıdaki bağlantılarla doğrudan açabilirsiniz.",
+    };
+  }
+
+  let rawOrganic = [];
+  let imagePool = [];
+  let providerName = "Dolap · Gardrops · sahibinden";
+
+  const shQuery = `${q} (site:dolap.com/urun OR site:gardrops.com OR site:sahibinden.com/ilan)`;
+
+  if (serperKey) {
+    providerName = "Dolap · Gardrops · sahibinden (Serper)";
+    const res = await fetch("https://google.serper.dev/search", {
+      method: "POST",
+      headers: { "X-API-KEY": serperKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ q: shQuery, gl: "tr", hl: "tr", num: 10 }),
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!res.ok) {
+      throw new Error(`2. El arama hatası (HTTP ${res.status})`);
+    }
+    const data = await res.json();
+    rawOrganic = Array.isArray(data.organic) ? data.organic : [];
+    imagePool = Array.isArray(data.images) ? data.images : [];
+
+    // Fallback broader query if /urun + /ilan had very few hits
+    if (rawOrganic.length < 3) {
+      try {
+        const res2 = await fetch("https://google.serper.dev/search", {
+          method: "POST",
+          headers: { "X-API-KEY": serperKey, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            q: `${q} (site:dolap.com OR site:gardrops.com OR site:sahibinden.com)`,
+            gl: "tr",
+            hl: "tr",
+            num: 10,
+          }),
+          signal: AbortSignal.timeout(10000),
+        });
+        if (res2.ok) {
+          const data2 = await res2.json();
+          if (Array.isArray(data2.organic)) rawOrganic.push(...data2.organic);
+        }
+      } catch {
+        // Non-fatal
+      }
+    }
+
+    const needPhotos = rawOrganic.filter((it) => !isUsableDirectPhoto(it?.imageUrl) && !isUsableDirectPhoto(it?.thumbnailUrl)).length;
+    if (rawOrganic.length > 0 && needPhotos > 0 && imagePool.length === 0) {
+      const imgKey = `2el:${q.toLocaleLowerCase("tr-TR")}`;
+      const cachedImgs = getCachedImages(imgKey);
+      if (cachedImgs) {
+        imagePool = cachedImgs;
+      } else {
+        try {
+          const imgRes = await fetch("https://google.serper.dev/images", {
+            method: "POST",
+            headers: { "X-API-KEY": serperKey, "Content-Type": "application/json" },
+            body: JSON.stringify({ q: `${q} dolap gardrops`, gl: "tr", hl: "tr", num: 10 }),
+            signal: AbortSignal.timeout(9000),
+          });
+          if (imgRes.ok) {
+            const imgData = await imgRes.json();
+            if (Array.isArray(imgData.images) && imgData.images.length) {
+              imagePool = imgData.images;
+              setCachedImages(imgKey, imgData.images);
+            }
+          }
+        } catch {
+          // Non-fatal
+        }
+      }
+    }
+  } else if (serpApiKey) {
+    providerName = "Dolap · Gardrops · sahibinden (SerpAPI)";
+    const url = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(shQuery)}&gl=tr&hl=tr&num=10&api_key=${encodeURIComponent(serpApiKey)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
+    if (!res.ok) throw new Error(`2. El SerpAPI yanıt hatası (HTTP ${res.status})`);
+    const data = await res.json();
+    rawOrganic = (Array.isArray(data.organic_results) ? data.organic_results : []).map((it) => ({
+      title: it.title,
+      link: it.link,
+      snippet: it.snippet || "",
+      imageUrl: it.thumbnail || "",
+      price: it.rich_snippet?.bottom?.detected_extensions?.price ?? it.rich_snippet?.top?.detected_extensions?.price,
+      currency: it.rich_snippet?.bottom?.detected_extensions?.currency ?? it.rich_snippet?.top?.detected_extensions?.currency,
+    }));
+  }
+
+  const seen = new Set();
+  const usedImgs = new Set();
+  const items = [];
+
+  for (const raw of rawOrganic) {
+    const link = raw?.link;
+    const title = String(raw?.title || "").replace(/\s+/g, " ").trim();
+    const norm = normalizeUrlForMatch(link);
+    if (!link || !title || seen.has(norm) || isNonShoppingUrl(link)) continue;
+    seen.add(norm);
+
+    const cls = classifyStoreUrl(link, title);
+    const storeMeta = resolveStoreFromUrl(link, raw.source || "");
+    const priceInfo = extractOrganicPriceInfo(raw);
+    const snippet = String(raw.snippet || "").replace(/\s+/g, " ").trim();
+    const condition = detectSecondHandCondition(title, snippet);
+    const variantAttrs = extractVariantAttributes(title, cls.isListingPage ? "" : cls.slug);
+
+    const directImg = isUsableDirectPhoto(raw.imageUrl)
+      ? raw.imageUrl
+      : isUsableDirectPhoto(raw.thumbnailUrl)
+        ? raw.thumbnailUrl
+        : "";
+    if (directImg) usedImgs.add(directImg);
+
+    const matchedPhoto =
+      directImg ||
+      pickBestProductImage(
+        {
+          title,
+          url: link,
+          host: storeMeta.host,
+          productId: cls.productId,
+          color: variantAttrs.color,
+          slug: cls.isListingPage ? "" : cls.slug,
+        },
+        imagePool,
+        usedImgs,
+        q
+      );
+
+    items.push({
+      id: `2el-${items.length + 1}`,
+      title,
+      url: link,
+      externalUrl: link,
+      platform: storeMeta.platform,
+      badge: storeMeta.platform,
+      logoUrl: storeMeta.logoUrl,
+      image: matchedPhoto || storeMeta.logoUrl || "",
+      price: !cls.isListingPage && priceInfo.price && priceInfo.price > 0 ? priceInfo.price : null,
+      shippingLabel: priceInfo.shipping?.label || "Satıcı ile kontrol edin",
+      condition,
+      isSecondHand: true,
+      isListingPage: cls.isListingPage,
+      isProductPage: cls.isProductPage,
+      variantAttrs,
+      snippet: snippet.slice(0, 140),
+    });
+  }
+
+  // Sort: direct priced items first (cheapest ascending), then direct unpriced, then listing pages
+  items.sort((a, b) => {
+    const aRank = a.isListingPage ? 2 : a.price ? 0 : 1;
+    const bRank = b.isListingPage ? 2 : b.price ? 0 : 1;
+    if (aRank !== bRank) return aRank - bRank;
+    if (a.price && b.price) return a.price - b.price;
+    return 0;
+  });
+
+  const pricedItems = items.filter((it) => typeof it.price === "number" && it.price > 0);
+  const lowestPrice = pricedItems.length ? Math.min(...pricedItems.map((it) => it.price)) : null;
+
+  const payload = {
+    query: q,
+    provider: providerName,
+    liveIndexed: true,
+    fetchedAt: new Date().toISOString(),
+    cached: false,
+    totalFound: items.length,
+    pricedFound: pricedItems.length,
+    lowestPrice,
+    items,
+    quickLinks,
+  };
+
+  if (secondHandCache.size > 120) {
+    secondHandCache.delete(secondHandCache.keys().next().value);
+  }
+  secondHandCache.set(cacheKey, { data: payload, expiresAt: Date.now() + 5 * 60 * 1000 });
+  return payload;
 }
 
 /**
@@ -1848,7 +2188,10 @@ async function fetchMigros(query, vertical = "elektronik") {
 
     const unitInfo = extractUnitInfo(title, price);
     const analysis = analyzeOffers([offer], unitInfo);
-    const histAnalysis = analyzePriceHistory([], price);
+    const histAnalysis = analyzePriceHistory([], price, null, {
+      medianNet: analysis.stats?.medianNet ?? price,
+      listPrice: regularPrice && regularPrice > price ? regularPrice : null,
+    });
 
     saveVirtualDetail(vKey, {
       id: `mg-${it.id}`,
@@ -1873,6 +2216,7 @@ async function fetchMigros(query, vertical = "elektronik") {
       offers: analysis.offers,
       history: [],
       historySummary: null,
+      fakeDiscount: histAnalysis.fakeDiscount,
       verdict: histAnalysis.verdict,
       variants: [],
       specs: regularPrice && regularPrice > price

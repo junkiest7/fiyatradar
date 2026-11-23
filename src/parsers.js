@@ -642,4 +642,51 @@ export function extractVariantAttributes(title, urlHint = "") {
   return { capacity, color, size, volume };
 }
 
+export const WATCHLIST_FOLDERS = [
+  "Teknoloji",
+  "Giyim & Ayakkabı",
+  "Parfüm & Kozmetik",
+  "Ev & Mutfak",
+  "Market",
+  "Diğer",
+];
+
+const FOLDER_RULES = [
+  [
+    "Parfüm & Kozmetik",
+    /\b(parfum|parfumeri|edp|edt|cologne|deodorant|krem|serum|ruj|rimel|maskara|fondoten|sampuan|sac\s+bakim|gunes\s+kremi|tonik|sephora|watsons|gratis|dior|chanel|ysl|lancome)\b/i,
+  ],
+  [
+    "Giyim & Ayakkabı",
+    /\b(gomlek|tisort|t-shirt|elbise|pantolon|jean|ceket|mont|kaban|trenckot|kazak|sweat|sweatshirt|bluz|etek|hirka|sort|tayt|ayakkabi|sneaker|bot|topuklu|cizme|loafer|sandalet|terlik|canta|gozluk|gunes\s+gozlugu|stradivarius|bershka|pullandbear|mango|koton|defacto|lcw|mavi|nike|adidas|puma|gucci|ray-ban|zara)\b/i,
+  ],
+  [
+    "Teknoloji",
+    /\b(iphone|samsung|galaxy|xiaomi|redmi|macbook|laptop|notebook|tablet|ipad|airpods|kulaklik|akilli\s+saat|watch|televizyon|tv|monitor|ssd|ram|ekran\s+karti|playstation|ps5|xbox|nintendo|kamera|projeksiyon|klavye|mouse|powerbank|apple|huawei|lenovo|asus|hp|dell|msi)\b/i,
+  ],
+  [
+    "Ev & Mutfak",
+    /\b(airfryer|fritoz|supurge|dyson|robot\s+supurge|kahve\s+makinesi|espresso|blender|mikser|tencere|tava|firin|mikrodalga|buzdolabi|camasir|bulasik|utu|klima|vantilator|kettle|su\s+isitici|nevresim|yastik|hali|sandalye|masa|koltuk|karaca|korkmaz|philips|bosch|siemens|arcelik|beko|ikea|english\s+home|madame\s+coco)\b/i,
+  ],
+  [
+    "Market",
+    /\b(kahve|cekirdek\s+kahve|cay|zeytinyagi|aycicek\s+yagi|bebek\s+bezi|prima|deterjan|yumusatici|sut|peynir|cikolata|nutella|makarna|pirinc|un|seker|su|soda|biskuvi|kedi\s+mamasi|kopek\s+mamasi|tuvalet\s+kagidi|havlu\s+kagit|lavazza|migros|bim|a101|sok)\b/i,
+  ],
+];
+
+/**
+ * Automatically suggests a Turkish watchlist folder/category from a product title.
+ * @param {string} title
+ * @returns {string}
+ */
+export function suggestWatchlistFolder(title) {
+  const norm = transliterateTr(String(title || "")).toLowerCase();
+  if (!norm) return "Diğer";
+  for (const [folder, regex] of FOLDER_RULES) {
+    if (regex.test(norm)) return folder;
+  }
+  return "Diğer";
+}
+
+
 

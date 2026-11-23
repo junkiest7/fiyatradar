@@ -15,10 +15,23 @@ import {
 } from "./mediaSearch.js";
 import { generatePriceCard, sharePriceCardBlob } from "./shareCard.js";
 
+const DEFAULT_WATCHLIST_FOLDERS = [
+  "Teknoloji",
+  "Giyim & Ayakkabı",
+  "Parfüm & Kozmetik",
+  "Ev & Mutfak",
+  "Market",
+  "Diğer",
+];
+
 const state = {
   activeView: "search", // 'search' | 'detail' | 'compare' | 'cart' | 'watchlist' | 'history'
   lastQuery: "",
   searchData: null,
+  searchMode: "retail", // 'retail' | 'secondhand'
+  secondHandData: null,
+  secondHandLoading: false,
+  secondHandError: "",
   searchFilters: {
     hideAccessories: true,
     hideListings: true,
@@ -54,6 +67,8 @@ const state = {
   cart: loadLocalCart(), // [{ id, title, url, image, lowestPrice, quantity }]
   cartPlan: null,
   watchlist: [],
+  watchlistFolder: "", // '' = Tümü
+  customFolders: loadLocalCustomFolders(),
   history: [],
   suggestIndex: -1,
   suggestions: [],
@@ -85,8 +100,10 @@ const els = {
   viewHistory: $("viewHistory"),
   linkResolvedBanner: $("linkResolvedBanner"),
   fallbackNoticeBanner: $("fallbackNoticeBanner"),
+  searchModeBar: $("searchModeBar"),
   quickFilterBar: $("quickFilterBar"),
   variantGroupBar: $("variantGroupBar"),
+  secondHandPanel: $("secondHandPanel"),
   resultsHeading: $("resultsHeading"),
   resultsSubmeta: $("resultsSubmeta"),
   resultsGrid: $("resultsGrid"),
@@ -153,6 +170,9 @@ const els = {
   cartPlanContainer: $("cartPlanContainer"),
   optimizeCartBtn: $("optimizeCartBtn"),
   clearCartBtn: $("clearCartBtn"),
+  newFolderBtn: $("newFolderBtn"),
+  watchlistFolderBar: $("watchlistFolderBar"),
+  watchlistBudgetSummary: $("watchlistBudgetSummary"),
   watchlistContainer: $("watchlistContainer"),
   refreshWatchlistBtn: $("refreshWatchlistBtn"),
   historyContainer: $("historyContainer"),
@@ -285,6 +305,135 @@ function saveLocalWatchlist(items) {
   }
 }
 
+function loadLocalCustomFolders() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem("fiyatradar_custom_folders") || "[]");
+    return Array.isArray(parsed) ? parsed.filter((x) => typeof x === "string" && x.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalCustomFolders() {
+  try {
+    localStorage.setItem("fiyatradar_custom_folders", JSON.stringify(state.customFolders || []));
+  } catch {
+    // Ignore
+  }
+}
+
+function getAllWatchlistFolders() {
+  const set = new Set([...DEFAULT_WATCHLIST_FOLDERS, ...(state.customFolders || [])]);
+  for (const w of state.watchlist || []) {
+    if (w?.folder && w.folder.trim()) set.add(w.folder.trim());
+  }
+  return [...set];
+}
+
+function suggestClientFolder(title) {
+  const trMap = { ğ: "g", ü: "u", ş: "s", ı: "i", ö: "o", ç: "c", İ: "i", Ğ: "g", Ü: "u", Ş: "s", Ö: "o", Ç: "c" };
+  const norm = String(title || "").replace(/[ğüşıöçİĞÜŞÖÇ]/g, (c) => trMap[c] || c).toLowerCase();
+  if (/\b(parfum|parfumeri|edp|edt|deodorant|krem|serum|ruj|maskara|sampuan|sephora|watsons|gratis)\b/.test(norm)) {
+    return "Parfüm & Kozmetik";
+  }
+  if (/\b(gomlek|tisort|t-shirt|elbise|pantolon|jean|ceket|mont|kaban|kazak|sweat|ayakkabi|sneaker|bot|topuklu|canta|gozluk|stradivarius|bershka|mango|zara|nike|adidas|gucci)\b/.test(norm)) {
+    return "Giyim & Ayakkabı";
+  }
+  if (/\b(iphone|samsung|galaxy|xiaomi|macbook|laptop|tablet|ipad|airpods|kulaklik|watch|tv|televizyon|monitor|ssd|ps5|playstation|apple)\b/.test(norm)) {
+    return "Teknoloji";
+  }
+  if (/\b(airfryer|fritoz|supurge|dyson|kahve\s+makinesi|blender|tencere|firin|buzdolabi|camasir|utu|klima|kettle|karaca|philips|ikea)\b/.test(norm)) {
+    return "Ev & Mutfak";
+  }
+  if (/\b(kahve|cay|zeytinyagi|bebek\s+bezi|prima|deterjan|sut|peynir|cikolata|nutella|makarna|lavazza|migros|bim|a101)\b/.test(norm)) {
+    return "Market";
+  }
+  return "Diğer";
+}
+
+function computeClientFakeDiscount(points, latestPrice) {
+  if (!Array.isArray(points) || points.length < 2 || !latestPrice) return null;
+  const r2 = (n) => Math.round(n * 100) / 100;
+  const medianOf = (arr) => {
+    const s = [...arr].sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+  };
+  const recentLen = Math.min(30, Math.max(2, Math.ceil(points.length * 0.45)));
+  const startIdx = Math.max(1, points.length - recentLen);
+  let peakIdx = startIdx;
+  for (let i = startIdx; i < points.length; i++) {
+    if (points[i].price > points[peakIdx].price) peakIdx = i;
+  }
+  const peak = points[peakIdx];
+  const preSlice = points.slice(0, peakIdx).map((p) => p.price);
+  const normalPrice = r2(preSlice.length ? medianOf(preSlice) : points[0].price);
+  const overallMedian = r2(medianOf(points.map((p) => p.price)));
+  const spikePct = normalPrice > 0 ? r2(((peak.price - normalPrice) / normalPrice) * 100) : 0;
+  const apparentDropPct = peak.price > 0 ? r2(((peak.price - latestPrice) / peak.price) * 100) : 0;
+  const realDiffPct = normalPrice > 0 ? r2(((latestPrice - normalPrice) / normalPrice) * 100) : 0;
+  const metrics = {
+    normalPrice,
+    peakPrice: peak.price,
+    peakDate: peak.dateLabel || "",
+    currentPrice: latestPrice,
+    overallMedian,
+    spikePct,
+    apparentDropPct,
+    realDiffPct,
+  };
+
+  if (spikePct >= 10 && apparentDropPct >= 5 && realDiffPct >= -2) {
+    return {
+      status: "fake_discount",
+      tone: "bad",
+      authenticityScore: Math.max(8, Math.min(35, Math.round(32 - Math.max(0, realDiffPct) * 1.4))),
+      label: "⚠ Sahte İndirim Riski",
+      headline: `Kayıtlarınıza göre fiyat önce +%${spikePct} yükselip sonra %${apparentDropPct} inmiş; eski normal fiyatın ${realDiffPct > 0.5 ? `+%${realDiffPct} üzerinde` : "neredeyse aynısı"}.`,
+      details: [
+        `Normal fiyat medyanı ${fmtTL(normalPrice)} iken ${peak.dateLabel} tarihinde ${fmtTL(peak.price)} seviyesine çıkmış.`,
+        `Güncel fiyat (${fmtTL(latestPrice)}) kampanya öncesi normal seviyenin altında değil.`,
+      ],
+      metrics,
+      hasHistory: true,
+    };
+  }
+  if (realDiffPct <= -5) {
+    return {
+      status: "genuine_discount",
+      tone: "good",
+      authenticityScore: Math.min(98, Math.round(78 + Math.min(20, Math.abs(realDiffPct) * 1.1))),
+      label: "✓ Gerçek İndirim Doğrulandı",
+      headline: `Kayıtlı normal fiyatınıza (${fmtTL(normalPrice)}) göre gerçek %${Math.abs(realDiffPct)} (${fmtTL(normalPrice - latestPrice)}) indirim var.`,
+      details: ["Kişisel fiyat kayıtlarınızda yapay şişirme görülmedi; gerçek düşüş tespit edildi."],
+      metrics,
+      hasHistory: true,
+    };
+  }
+  if (realDiffPct >= 8) {
+    return {
+      status: "inflated",
+      tone: "bad",
+      authenticityScore: Math.max(15, Math.min(42, Math.round(42 - realDiffPct))),
+      label: "↑ Fiyat Şişirmesi (Bekleyin)",
+      headline: `Fiyat kayıtlı normal seviyenin (${fmtTL(normalPrice)}) +%${realDiffPct} üzerinde.`,
+      details: ["Kampanya öncesi zam dalgası olabilir; geri çekilmeyi beklemek avantajlı olabilir."],
+      metrics,
+      hasHistory: true,
+    };
+  }
+  return {
+    status: "stable",
+    tone: "neutral",
+    authenticityScore: 70,
+    label: "• Normal Piyasa Seyri",
+    headline: `Kayıtlı normal fiyatına (${fmtTL(normalPrice)}) paralel seyrediyor.`,
+    details: ["Sahte indirim veya ani zam/indirim manipülasyonu tespit edilmedi."],
+    metrics,
+    hasHistory: true,
+  };
+}
+
 // Local iPhone personal price snapshots (survives cloud restarts!)
 function recordLocalSnapshot(key, netPrice) {
   if (!key || typeof netPrice !== "number" || !Number.isFinite(netPrice) || netPrice <= 0) return [];
@@ -367,12 +516,14 @@ function mergePersonalPriceHistory(detail) {
   const diffFromMinPct = minPt.price > 0 ? Math.round(((latestP - minPt.price) / minPt.price) * 1000) / 10 : 0;
   const variance = prices.reduce((s, v) => s + (v - avgAll) ** 2, 0) / prices.length;
   const volatilityPct = avgAll > 0 ? Math.round((Math.sqrt(variance) / avgAll) * 1000) / 10 : 0;
+  const clientFakeDiscount = computeClientFakeDiscount(points, currentNet || latestP);
 
   return {
     ...detail,
     isPersonalHistory: true,
     personalHistoryCount: points.length,
     history: points,
+    fakeDiscount: clientFakeDiscount || detail.fakeDiscount || null,
     historySummary: {
       dataPoints: points.length,
       startDate: points[0].dateLabel,
@@ -589,12 +740,18 @@ async function performSearch(query, opts = {}) {
     }
 
     state.searchData = data;
+    state.searchMode = "retail";
+    state.secondHandData = null;
+    state.secondHandLoading = false;
+    state.secondHandError = "";
     // Reset per-search quick filters cleanly; auto-hide accessories and category/listing pages when direct priced products exist
     const allProds = data.products || [];
-    const hasAccessories = allProds.some((p) => p.isAccessory);
-    const hasPrimary = allProds.some((p) => !p.isAccessory);
-    const hasListings = allProds.some((p) => p.isListingPage);
-    const directPricedCount = allProds.filter(
+    const hasRetail = allProds.some((p) => !p.isSecondHand);
+    const retailProds = hasRetail ? allProds.filter((p) => !p.isSecondHand) : allProds;
+    const hasAccessories = retailProds.some((p) => p.isAccessory);
+    const hasPrimary = retailProds.some((p) => !p.isAccessory);
+    const hasListings = retailProds.some((p) => p.isListingPage);
+    const directPricedCount = retailProds.filter(
       (p) => !p.isListingPage && p.badge !== "Tüm Mağazalar" && typeof p.lowestPrice === "number" && p.lowestPrice > 0
     ).length;
     state.searchFilters = {
@@ -669,8 +826,14 @@ function isFaviconUrl(urlStr) {
   return typeof urlStr === "string" && /google\.com\/s2\/favicons/i.test(urlStr);
 }
 
-function getFilteredSearchProducts() {
+function getRetailBaseProducts() {
   const all = state.searchData?.products || [];
+  const hasRetail = all.some((p) => !p.isSecondHand);
+  return hasRetail ? all.filter((p) => !p.isSecondHand) : all;
+}
+
+function getFilteredSearchProducts() {
+  const all = getRetailBaseProducts();
   const f = state.searchFilters;
   return all.filter((p) => {
     if (f.hideAccessories && p.isAccessory) return false;
@@ -690,9 +853,299 @@ function getFilteredSearchProducts() {
   });
 }
 
+function getCombinedSecondHandItems() {
+  const map = new Map();
+  const normKey = (u) => String(u || "").replace(/[?#].*$/, "").replace(/\/+$/, "").toLowerCase();
+
+  for (const p of state.searchData?.products || []) {
+    if (!p.isSecondHand) continue;
+    const link = p.externalUrl || p.url;
+    const key = normKey(link);
+    if (!key || map.has(key)) continue;
+    map.set(key, {
+      id: p.id,
+      title: p.title,
+      url: link,
+      externalUrl: link,
+      platform: p.badge || p.source || "2. El",
+      badge: p.badge || p.source || "2. El",
+      image: p.image || "",
+      price: typeof p.lowestPrice === "number" && p.lowestPrice > 0 ? p.lowestPrice : null,
+      condition: p.secondHandCondition || "2. El",
+      isListingPage: Boolean(p.isListingPage),
+      variantAttrs: p.variantAttrs || {},
+      snippet: "",
+    });
+  }
+
+  for (const it of state.secondHandData?.items || []) {
+    const link = it.externalUrl || it.url;
+    const key = normKey(link);
+    if (!key) continue;
+    const prev = map.get(key);
+    if (!prev || (it.price && !prev.price) || (it.snippet && !prev.snippet)) {
+      map.set(key, it);
+    }
+  }
+
+  return [...map.values()].sort((a, b) => {
+    const aRank = a.isListingPage ? 2 : a.price ? 0 : 1;
+    const bRank = b.isListingPage ? 2 : b.price ? 0 : 1;
+    if (aRank !== bRank) return aRank - bRank;
+    if (a.price && b.price) return a.price - b.price;
+    return 0;
+  });
+}
+
+function buildClientSecondHandQuickLinks(query) {
+  const enc = encodeURIComponent(String(query || "").trim());
+  return [
+    {
+      platform: "Dolap",
+      label: "Dolap'ta Ara (Yeni & Etiketli / 2. El)",
+      url: `https://dolap.com/ara?q=${enc}`,
+      logoUrl: "https://www.google.com/s2/favicons?domain=dolap.com&sz=64",
+    },
+    {
+      platform: "Gardrops",
+      label: "Gardrops'ta Ara (2. El / Etiketli)",
+      url: `https://www.gardrops.com/ara?q=${enc}`,
+      logoUrl: "https://www.google.com/s2/favicons?domain=gardrops.com&sz=64",
+    },
+    {
+      platform: "sahibinden",
+      label: "sahibinden'de Ara",
+      url: `https://www.sahibinden.com/kelime-ile-arama?query_text=${enc}`,
+      logoUrl: "https://www.google.com/s2/favicons?domain=sahibinden.com&sz=64",
+    },
+  ];
+}
+
+function getConditionBadgeClass(condition) {
+  const c = String(condition || "").toLocaleLowerCase("tr-TR");
+  if (c.includes("etiketli") || c.includes("yeni")) return "tagged";
+  if (c.includes("az") || c.includes("temiz")) return "lightly-used";
+  if (c.includes("yenilenmiş")) return "refurbished";
+  return "used";
+}
+
+function renderSearchModeBar() {
+  if (!els.searchModeBar) return;
+  const data = state.searchData;
+  if (!data?.query) {
+    els.searchModeBar.hidden = true;
+    els.searchModeBar.innerHTML = "";
+    return;
+  }
+
+  const retailCount = getRetailBaseProducts().length;
+  const shItems = getCombinedSecondHandItems();
+  const shCount = shItems.length;
+  const shBadge = state.secondHandLoading
+    ? "..."
+    : shCount > 0
+      ? `${shCount}`
+      : "Karşılaştır";
+
+  els.searchModeBar.hidden = false;
+  els.searchModeBar.innerHTML = `
+    <div class="mode-tabs" role="tablist" aria-label="Sıfır ve 2. El Mağaza Sekmeleri">
+      <button type="button" role="tab" aria-selected="${state.searchMode === "retail"}" class="mode-tab-btn ${state.searchMode === "retail" ? "active" : ""}" data-search-mode="retail">
+        <span>Sıfır Mağazalar</span>
+        <span class="mode-tab-count">${retailCount}</span>
+      </button>
+      <button type="button" role="tab" aria-selected="${state.searchMode === "secondhand"}" class="mode-tab-btn ${state.searchMode === "secondhand" ? "active" : ""}" data-search-mode="secondhand">
+        <span>2. El / Etiketli (Dolap · Gardrops)</span>
+        <span class="mode-tab-count ${shCount > 0 ? "accent" : ""}">${esc(shBadge)}</span>
+      </button>
+    </div>
+  `;
+}
+
+async function loadSecondHandResults(refresh = false) {
+  const q = state.searchData?.query;
+  if (!q) return;
+  if (state.secondHandLoading) return;
+  if (!refresh && state.secondHandData && state.secondHandData.query === q) return;
+
+  state.secondHandLoading = true;
+  state.secondHandError = "";
+  renderSearchResults();
+
+  try {
+    const params = new URLSearchParams({ q });
+    if (refresh) params.set("refresh", "1");
+    const res = await apiFetch(`/api/search/secondhand?${params.toString()}`);
+    state.secondHandData = res;
+  } catch (err) {
+    state.secondHandError = err.message || "2. El / Etiketli ilanları alınamadı.";
+  } finally {
+    state.secondHandLoading = false;
+    if (state.activeView === "search") renderSearchResults();
+  }
+}
+
+function renderSecondHandView() {
+  if (!els.secondHandPanel || !state.searchData) return;
+  const q = state.searchData.query;
+  const sh = state.secondHandData;
+  const items = getCombinedSecondHandItems();
+  const quickLinks = sh?.quickLinks?.length ? sh.quickLinks : buildClientSecondHandQuickLinks(q);
+
+  // Compute lowest brand-new retail price for Sıfır vs. 2. El savings comparison
+  const retailPriced = getRetailBaseProducts()
+    .filter(
+      (p) =>
+        !p.isSecondHand &&
+        !p.isAccessory &&
+        !p.isListingPage &&
+        p.badge !== "Tüm Mağazalar" &&
+        typeof p.lowestPrice === "number" &&
+        p.lowestPrice > 0
+    )
+    .map((p) => p.lowestPrice);
+  const retailMin = retailPriced.length ? Math.min(...retailPriced) : null;
+
+  const shPriced = items
+    .filter((it) => !it.isListingPage && typeof it.price === "number" && it.price > 0)
+    .map((it) => it.price);
+  const shMin = shPriced.length ? Math.min(...shPriced) : null;
+
+  let savingsHtml = "";
+  if (retailMin && shMin) {
+    const diff = Math.round((retailMin - shMin) * 100) / 100;
+    const pct = retailMin > 0 ? Math.round((diff / retailMin) * 1000) / 10 : 0;
+    const isCheaper = diff > 0;
+    savingsHtml = `
+      <div class="secondhand-savings-banner ${isCheaper ? "good" : "neutral"}">
+        <div class="sh-compare-metric">
+          <span class="sh-metric-label">Sıfır Mağaza En Ucuz</span>
+          <strong class="sh-metric-val mono">${fmtTL(retailMin)}</strong>
+        </div>
+        <div class="sh-compare-arrow" aria-hidden="true">→</div>
+        <div class="sh-compare-metric">
+          <span class="sh-metric-label">2. El / Etiketli En Ucuz</span>
+          <strong class="sh-metric-val mono ${isCheaper ? "good" : ""}">${fmtTL(shMin)}</strong>
+        </div>
+        <div class="sh-compare-verdict">
+          ${
+            isCheaper
+              ? `<span class="sh-save-badge">✓ ${fmtTL(diff)} (${fmtPct(pct, false)}) tasarruf</span>`
+              : `<span class="sh-save-badge neutral">Sıfır mağaza fiyatı şu an daha avantajlı</span>`
+          }
+        </div>
+      </div>
+    `;
+  }
+
+  const cardsHtml = items.length
+    ? `
+      <div class="results-grid" style="margin-top:14px;">
+        ${items
+          .map((it) => {
+            const imgIsFavicon = isFaviconUrl(it.image);
+            const colorLabel = it.variantAttrs?.color || "";
+            const sizeLabel = it.variantAttrs?.size || it.variantAttrs?.capacity || "";
+            const condClass = getConditionBadgeClass(it.condition);
+            return `
+              <article class="product-card secondhand-card">
+                <a class="product-card-media ${imgIsFavicon ? "is-favicon-wrap" : ""}" href="${esc(it.externalUrl || it.url)}" target="_blank" rel="noopener noreferrer">
+                  ${
+                    it.image
+                      ? `<img src="${esc(it.image)}" alt="${esc(it.title)}" class="${imgIsFavicon ? "is-favicon" : ""}" loading="lazy" />`
+                      : `<span class="muted-text">Görsel yok</span>`
+                  }
+                </a>
+                <div style="display:flex;flex-wrap:wrap;gap:5px;align-items:center;">
+                  <span class="offer-pill">${esc(it.platform || it.badge || "2. El")}</span>
+                  <span class="condition-badge ${condClass}">${esc(it.condition || "2. El")}</span>
+                  ${colorLabel ? `<span class="color-tag">${renderColorSwatch(colorLabel)}${esc(colorLabel)}</span>` : ""}
+                  ${sizeLabel ? `<span class="mini-badge fast">${esc(sizeLabel)}</span>` : ""}
+                </div>
+                <h3 class="product-card-title" title="${esc(it.title)}">${esc(it.title)}</h3>
+                ${it.snippet ? `<p class="sh-snippet">${esc(it.snippet)}</p>` : ""}
+                <div class="product-card-pricing">
+                  <span class="price-main">${it.price ? fmtTL(it.price) : "İlanda Gör"}</span>
+                  <span class="offer-pill">${it.isListingPage ? "Arama Sayfası" : "Doğrudan İlan"}</span>
+                </div>
+                <div class="product-card-footer">
+                  <a href="${esc(it.externalUrl || it.url)}" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm btn-analyze">
+                    ${it.isListingPage ? `${esc(it.platform || "Platform")}'da Gör ↗` : "İlana Git ↗"}
+                  </a>
+                </div>
+              </article>
+            `;
+          })
+          .join("")}
+      </div>
+    `
+    : !state.secondHandLoading && !state.secondHandError
+      ? `
+      <div class="empty-state" style="margin-top:14px;">
+        <h3>${sh?.liveIndexed ? "İndekslenmiş doğrudan ilan bulunamadı" : "2. El Platformlarında Hızlı Arama"}</h3>
+        <p>${
+          sh?.notice
+            ? esc(sh.notice)
+            : `"${esc(q)}" için Dolap, Gardrops veya sahibinden üzerinde doğrudan fiyatlı ilan eşleşmedi. Aşağıdaki tek tık bağlantılarla canlı ilanlara anında ulaşabilirsiniz.`
+        }</p>
+        ${sh && !sh.liveIndexed ? `<button type="button" class="btn btn-primary btn-sm" data-open-settings="1" style="margin-top:10px;">Ücretsiz API ile Canlı Fiyatları Aç</button>` : ""}
+      </div>
+    `
+      : "";
+
+  els.secondHandPanel.innerHTML = `
+    <div class="secondhand-header">
+      <div>
+        <h3>2. El & Yeni Etiketli Piyasası</h3>
+        <p class="muted-text" style="margin:2px 0 0;">
+          Dolap, Gardrops ve sahibinden ilanları sıfır mağaza medyanını bozmadan ayrı listelenir${sh?.provider ? ` · ${esc(sh.provider)}` : ""}.
+        </p>
+      </div>
+      <button type="button" class="btn btn-secondary btn-sm" data-refresh-secondhand="1" ${state.secondHandLoading ? "disabled" : ""}>
+        ${state.secondHandLoading ? "Taranıyor..." : "İlanları Yenile"}
+      </button>
+    </div>
+
+    ${savingsHtml}
+
+    ${
+      state.secondHandLoading
+        ? `<div class="status-banner loading" style="margin-top:12px;"><span class="spinner" aria-hidden="true"></span><span>Dolap, Gardrops ve sahibinden ilanları taranıyor...</span></div>`
+        : ""
+    }
+    ${
+      state.secondHandError
+        ? `<div class="status-banner error" style="margin-top:12px;"><span>${esc(state.secondHandError)}</span></div>`
+        : ""
+    }
+
+    ${cardsHtml}
+
+    <div class="secondhand-quick-wrap">
+      <div class="sh-quick-title">Tek Tıkla 2. El Platformlarında Ara</div>
+      <div class="secondhand-quick-links">
+        ${quickLinks
+          .map(
+            (ql) => `
+          <a href="${esc(ql.url)}" target="_blank" rel="noopener noreferrer" class="secondhand-quick-card">
+            ${ql.logoUrl ? `<img src="${esc(ql.logoUrl)}" alt="${esc(ql.platform)}" class="sh-ql-logo" />` : ""}
+            <div class="sh-ql-copy">
+              <strong>${esc(ql.platform)}</strong>
+              <span>${esc(ql.label)}</span>
+            </div>
+            <span class="sh-ql-arrow" aria-hidden="true">↗</span>
+          </a>
+        `
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
 function renderVariantGroupBar() {
   if (!els.variantGroupBar) return;
-  const all = state.searchData?.products || [];
+  const all = getRetailBaseProducts();
   const f = state.searchFilters;
   const pool = all.filter(
     (p) =>
@@ -766,7 +1219,7 @@ function renderVariantGroupBar() {
 
 function renderQuickFilterBar() {
   if (!els.quickFilterBar) return;
-  const all = state.searchData?.products || [];
+  const all = getRetailBaseProducts();
   if (!all.length) {
     els.quickFilterBar.hidden = true;
     els.quickFilterBar.innerHTML = "";
@@ -865,13 +1318,34 @@ function renderSearchResults() {
     }
   }
 
+  renderSearchModeBar();
+
+  if (state.searchMode === "secondhand") {
+    if (els.quickFilterBar) els.quickFilterBar.hidden = true;
+    if (els.variantGroupBar) els.variantGroupBar.hidden = true;
+    if (els.resultsGrid) els.resultsGrid.hidden = true;
+    if (els.secondHandPanel) els.secondHandPanel.hidden = false;
+
+    const shCount = getCombinedSecondHandItems().length;
+    els.resultsHeading.textContent = `"${data.query}" — 2. El / Etiketli`;
+    els.resultsSubmeta.textContent = state.secondHandLoading
+      ? "Dolap, Gardrops ve sahibinden taranıyor..."
+      : `${shCount} 2. el / etiketli ilan · Sıfır mağazalardan ayrı karşılaştırma`;
+    renderSecondHandView();
+    return;
+  }
+
+  if (els.secondHandPanel) els.secondHandPanel.hidden = true;
+  if (els.resultsGrid) els.resultsGrid.hidden = false;
+
   renderQuickFilterBar();
   renderVariantGroupBar();
 
   const visibleProducts = getFilteredSearchProducts();
+  const retailBaseCount = getRetailBaseProducts().length;
   els.resultsHeading.textContent = `"${data.query}" sonuçları`;
   const providerTag = data.provider ? ` · Kaynak: ${data.provider}` : "";
-  els.resultsSubmeta.textContent = `${visibleProducts.length} / ${data.totalFound} ürün listelendi${providerTag}${data.cached ? " · Önbellek" : " · Canlı"}`;
+  els.resultsSubmeta.textContent = `${visibleProducts.length} / ${retailBaseCount} sıfır ürün listelendi${providerTag}${data.cached ? " · Önbellek" : " · Canlı"}`;
 
   if (!visibleProducts.length) {
     els.resultsGrid.innerHTML = `
@@ -993,6 +1467,88 @@ function computeInstallment(principal, months, monthlyRatePct) {
   return { monthly, total, extra };
 }
 
+function renderFakeDiscountPanel(fd) {
+  if (!fd) return "";
+  const tone = fd.tone || "neutral";
+  const hasScore = typeof fd.authenticityScore === "number" && Number.isFinite(fd.authenticityScore);
+  const m = fd.metrics || null;
+
+  let trajectoryHtml = "";
+  if (m && typeof m.normalPrice === "number" && typeof m.peakPrice === "number" && m.peakPrice > 0) {
+    const spikeTag = m.spikePct > 0.5 ? `+${fmtPct(m.spikePct, false)}` : "Zirve";
+    const diffClass = m.realDiffPct <= -2 ? "good" : m.realDiffPct >= 2 ? "bad" : "";
+    trajectoryHtml = `
+      <div class="fd-trajectory">
+        <div class="fd-step">
+          <span class="fd-step-label">Önceki Normal Medyan</span>
+          <strong class="fd-step-val mono">${fmtTL(m.normalPrice)}</strong>
+        </div>
+        <span class="fd-arrow" aria-hidden="true">→</span>
+        <div class="fd-step peak">
+          <span class="fd-step-label">${esc(m.peakDate || "Kampanya Zirvesi")}</span>
+          <strong class="fd-step-val mono">${fmtTL(m.peakPrice)}</strong>
+          <span class="fd-step-sub">${esc(spikeTag)}</span>
+        </div>
+        <span class="fd-arrow" aria-hidden="true">→</span>
+        <div class="fd-step current">
+          <span class="fd-step-label">Güncel Net Fiyat</span>
+          <strong class="fd-step-val mono ${diffClass}">${fmtTL(m.currentPrice)}</strong>
+          <span class="fd-step-sub ${diffClass}">Gerçek fark: ${fmtPct(m.realDiffPct)}</span>
+        </div>
+      </div>
+    `;
+  } else if (m && typeof m.normalPrice === "number" && typeof m.currentPrice === "number") {
+    const diffClass = m.realDiffPct <= -2 ? "good" : m.realDiffPct >= 2 ? "bad" : "";
+    trajectoryHtml = `
+      <div class="fd-trajectory compact">
+        <div class="fd-step">
+          <span class="fd-step-label">Piyasa Medyanı</span>
+          <strong class="fd-step-val mono">${fmtTL(m.normalPrice)}</strong>
+        </div>
+        <span class="fd-arrow" aria-hidden="true">→</span>
+        <div class="fd-step current">
+          <span class="fd-step-label">En Ucuz Güncel</span>
+          <strong class="fd-step-val mono ${diffClass}">${fmtTL(m.currentPrice)}</strong>
+          <span class="fd-step-sub ${diffClass}">${fmtPct(m.realDiffPct)}</span>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <section class="fake-discount-panel ${esc(tone)}">
+      <div class="fd-header">
+        <div>
+          <span class="fd-eyebrow">Kampanya & Sahte İndirim Radarı</span>
+          <h3 class="fd-title">${esc(fd.label || "Fiyat Gerçeklik Analizi")}</h3>
+        </div>
+        ${
+          hasScore
+            ? `
+          <div class="fd-score-box">
+            <div class="fd-score-head">
+              <span class="fd-score-label">Gerçeklik Skoru</span>
+              <strong class="fd-score-num mono">${fd.authenticityScore}/100</strong>
+            </div>
+            <div class="fd-score-track" aria-hidden="true">
+              <div class="fd-score-fill ${esc(tone)}" style="width:${Math.max(4, Math.min(100, fd.authenticityScore))}%;"></div>
+            </div>
+          </div>
+        `
+            : `<span class="fd-pill neutral">Veri Birikiyor</span>`
+        }
+      </div>
+      <p class="fd-headline">${esc(fd.headline || "")}</p>
+      ${trajectoryHtml}
+      ${
+        fd.details?.length
+          ? `<ul class="fd-details">${fd.details.map((line) => `<li>${esc(line)}</li>`).join("")}</ul>`
+          : ""
+      }
+    </section>
+  `;
+}
+
 function renderDetailView() {
   const d = state.currentDetail;
   if (!d) return;
@@ -1010,6 +1566,8 @@ function renderDetailView() {
   els.backToResultsBtn.hidden = !state.searchData;
 
   const watched = state.watchlist.find((w) => w.url === d.url);
+  const selectedFolder = watched?.folder || suggestClientFolder(d.title);
+  const folderOptions = getAllWatchlistFolders();
   const stats = d.stats;
   const picks = d.picks;
   const hist = d.historySummary;
@@ -1044,7 +1602,7 @@ function renderDetailView() {
         </div>
 
         <form id="watchInlineForm" class="watch-inline">
-          <label for="targetPriceInput">Hedef Fiyat Alarmı (TL):</label>
+          <label for="targetPriceInput">Hedef Fiyat (TL):</label>
           <input
             type="number"
             id="targetPriceInput"
@@ -1053,6 +1611,11 @@ function renderDetailView() {
             placeholder="${stats?.minNet ? Math.round(stats.minNet * 0.95) : "Örn. 50000"}"
             value="${watched?.target_price ?? ""}"
           />
+          <select id="watchFolderSelect" class="select-sm" aria-label="Takip klasörü" title="Takip klasörü seçin">
+            ${folderOptions
+              .map((f) => `<option value="${esc(f)}" ${f === selectedFolder ? "selected" : ""}>${esc(f)}</option>`)
+              .join("")}
+          </select>
           <button type="submit" class="btn ${watched ? "btn-good" : "btn-primary"} btn-sm">
             ${watched ? "✓ Takibi Güncelle" : "Takibe Al"}
           </button>
@@ -1123,6 +1686,9 @@ function renderDetailView() {
     `
         : ""
     }
+
+    <!-- Campaign & Fake-Discount Radar ("Bindirim → İndirim" Detector) -->
+    ${renderFakeDiscountPanel(d.fakeDiscount)}
 
     <!-- Top 3 Picks -->
     ${
@@ -1446,6 +2012,7 @@ function renderDetailView() {
     e.preventDefault();
     const targetRaw = $("targetPriceInput").value.trim();
     const targetPrice = targetRaw ? Number.parseFloat(targetRaw) : null;
+    const folder = ($("watchFolderSelect")?.value || "").trim() || suggestClientFolder(d.title);
     try {
       const res = await apiFetch("/api/watchlist", {
         method: "POST",
@@ -1455,18 +2022,25 @@ function renderDetailView() {
           title: d.title,
           url: d.url,
           image: d.image,
+          folder,
           target_price: targetPrice,
           last_net_price: d.stats?.minNet ?? d.lowPrice,
           best_store: d.picks?.cheapestNet?.store || "",
           verdict_score: d.verdict?.score ?? null,
           verdict_label: d.verdict?.label || "",
+          fake_discount_status: d.fakeDiscount?.status || "",
+          fake_discount_label: d.fakeDiscount?.label || "",
           offer_count: d.totalOfferCount,
         }),
       });
       state.watchlist = res.items || [];
       saveLocalWatchlist(state.watchlist);
       updateWatchlistBadge();
-      showToast(targetPrice ? `Takibe alındı (Hedef: ${fmtTL(targetPrice)})` : "Ürün takip listenize eklendi.");
+      showToast(
+        targetPrice
+          ? `"${folder}" klasörüne eklendi (Hedef: ${fmtTL(targetPrice)})`
+          : `"${folder}" klasörüne eklendi.`
+      );
       renderDetailView();
     } catch (err) {
       showToast(`Hata: ${err.message}`);
@@ -2238,45 +2812,239 @@ async function loadWatchlist() {
   }
 }
 
+function computeClientWatchlistBudget(items, folderFilter = "") {
+  const r2 = (n) => Math.round(n * 100) / 100;
+  const all = Array.isArray(items) ? items : [];
+  const norm = (f) => String(f || "").trim() || "Diğer";
+
+  const folderMap = new Map();
+  for (const w of all) {
+    const f = norm(w.folder);
+    if (!folderMap.has(f)) {
+      folderMap.set(f, { folder: f, count: 0, targetHits: 0, currentTotal: 0 });
+    }
+    const b = folderMap.get(f);
+    b.count += 1;
+    if (w.targetReached) b.targetHits += 1;
+    if (typeof w.last_net_price === "number") b.currentTotal = r2(b.currentTotal + w.last_net_price);
+  }
+  for (const cf of state.customFolders || []) {
+    const f = norm(cf);
+    if (!folderMap.has(f)) {
+      folderMap.set(f, { folder: f, count: 0, targetHits: 0, currentTotal: 0 });
+    }
+  }
+
+  const folders = [...folderMap.values()].sort((a, b) => b.count - a.count || a.folder.localeCompare(b.folder, "tr"));
+  const scoped = folderFilter ? all.filter((w) => norm(w.folder) === norm(folderFilter)) : all;
+
+  let currentTotal = 0;
+  let initialTotal = 0;
+  let targetTotal = 0;
+  let targetHits = 0;
+  let itemsWithTarget = 0;
+
+  for (const w of scoped) {
+    const cur = typeof w.last_net_price === "number" ? w.last_net_price : 0;
+    const init = typeof w.initial_net_price === "number" ? w.initial_net_price : cur;
+    const hasTgt = typeof w.target_price === "number" && w.target_price > 0;
+    const tgt = hasTgt ? w.target_price : cur;
+    currentTotal = r2(currentTotal + cur);
+    initialTotal = r2(initialTotal + init);
+    targetTotal = r2(targetTotal + tgt);
+    if (hasTgt) itemsWithTarget += 1;
+    if (w.targetReached) targetHits += 1;
+  }
+
+  const netDelta = r2(currentTotal - initialTotal);
+  const netDeltaPct = initialTotal > 0 ? r2((netDelta / initialTotal) * 100) : 0;
+  const gapToTarget = r2(currentTotal - targetTotal);
+
+  return {
+    activeFolder: folderFilter || "Tümü",
+    count: scoped.length,
+    totalCount: all.length,
+    currentTotal,
+    initialTotal,
+    targetTotal,
+    netDelta,
+    netDeltaPct,
+    gapToTarget,
+    itemsWithTarget,
+    targetHits,
+    folders,
+    scoped,
+  };
+}
+
+function renderWatchFakeDiscountBadge(w) {
+  const st = w.fake_discount_status || "";
+  const lbl = w.fake_discount_label || "";
+  if (!st || st === "insufficient_history" || st === "stable") return "";
+  if (st === "fake_discount" || st === "inflated") {
+    return `<span class="mini-badge trap">${esc(lbl || "⚠ Sahte İndirim Riski")}</span>`;
+  }
+  if (st === "partial_discount") {
+    return `<span class="mini-badge fast">${esc(lbl || "⚡ Kısmi İndirim")}</span>`;
+  }
+  if (st === "genuine_discount" || st === "market_deal") {
+    return `<span class="mini-badge cheapest">${esc(lbl || "✓ Gerçek İndirim")}</span>`;
+  }
+  return "";
+}
+
 function renderWatchlistView() {
   const list = state.watchlist;
   els.refreshWatchlistBtn.hidden = list.length === 0;
+
+  // Reset active folder if it no longer exists in items or customFolders
+  const allFolders = getAllWatchlistFolders();
+  if (state.watchlistFolder && !allFolders.includes(state.watchlistFolder)) {
+    state.watchlistFolder = "";
+  }
+
+  const summary = computeClientWatchlistBudget(list, state.watchlistFolder);
+
+  // Render Folder Filter Bar whenever there are items or custom folders
+  if (els.watchlistFolderBar) {
+    if (list.length > 0 || (state.customFolders || []).length > 0) {
+      els.watchlistFolderBar.hidden = false;
+      els.watchlistFolderBar.innerHTML = `
+        <button type="button" class="folder-pill ${!state.watchlistFolder ? "active" : ""}" data-watch-folder="">
+          <span>Tümü</span>
+          <span class="folder-count">${list.length}</span>
+        </button>
+        ${summary.folders
+          .map(
+            (f) => `
+          <button type="button" class="folder-pill ${state.watchlistFolder === f.folder ? "active" : ""}" data-watch-folder="${esc(f.folder)}">
+            <span>${esc(f.folder)}</span>
+            <span class="folder-count">${f.count}</span>
+            ${f.targetHits > 0 ? `<span class="folder-hit-dot" title="${f.targetHits} ürün hedef fiyatta">${f.targetHits}★</span>` : ""}
+          </button>
+        `
+          )
+          .join("")}
+      `;
+    } else {
+      els.watchlistFolderBar.hidden = true;
+      els.watchlistFolderBar.innerHTML = "";
+    }
+  }
+
+  // Render Per-Folder / Overall Budget Summary Cards
+  if (els.watchlistBudgetSummary) {
+    if (list.length > 0) {
+      const deltaClass = summary.netDelta < -0.5 ? "good" : summary.netDelta > 0.5 ? "bad" : "";
+      const deltaSign = summary.netDelta > 0 ? "+" : "";
+      const gapText =
+        summary.itemsWithTarget > 0
+          ? summary.gapToTarget <= 0
+            ? "Hedef bütçenin altında!"
+            : `Hedefe ${fmtTL(summary.gapToTarget)} kaldı`
+          : "Ürünlere hedef fiyat girerek bütçe limiti belirleyin";
+
+      els.watchlistBudgetSummary.hidden = false;
+      els.watchlistBudgetSummary.innerHTML = `
+        <div class="kpi-card budget-card">
+          <div class="kpi-label">${esc(summary.activeFolder)} · Güncel Toplam</div>
+          <div class="kpi-value mono">${fmtTL(summary.currentTotal)}</div>
+          <div class="kpi-sub">${summary.count} takip edilen ürün</div>
+        </div>
+        <div class="kpi-card budget-card">
+          <div class="kpi-label">Hedef Bütçe Toplamı</div>
+          <div class="kpi-value mono">${fmtTL(summary.targetTotal)}</div>
+          <div class="kpi-sub">${esc(gapText)}</div>
+        </div>
+        <div class="kpi-card budget-card">
+          <div class="kpi-label">Takipten Beri Değişim</div>
+          <div class="kpi-value mono ${deltaClass}">${summary.netDelta === 0 ? "0,00 TL" : `${deltaSign}${fmtTL(summary.netDelta)}`}</div>
+          <div class="kpi-sub">${summary.netDelta === 0 ? "İlk kayıtla aynı seviyede" : `${fmtPct(summary.netDeltaPct)} net değişim`}</div>
+        </div>
+        <div class="kpi-card budget-card">
+          <div class="kpi-label">Hedef Fiyat Alarmları</div>
+          <div class="kpi-value ${summary.targetHits > 0 ? "good" : ""}">${summary.targetHits} / ${summary.itemsWithTarget}</div>
+          <div class="kpi-sub">${summary.targetHits > 0 ? `${summary.targetHits} ürün alım hedefinize ulaştı!` : "Hedef bekleyen ürünler"}</div>
+        </div>
+      `;
+    } else {
+      els.watchlistBudgetSummary.hidden = true;
+      els.watchlistBudgetSummary.innerHTML = "";
+    }
+  }
 
   if (!list.length) {
     els.watchlistContainer.innerHTML = `
       <div class="empty-state">
         <h3>Henüz takip ettiğiniz bir ürün yok</h3>
-        <p>Herhangi bir ürünün analiz sayfasında hedef fiyat belirleyip <strong>"Takibe Al"</strong> butonuna tıklayarak fiyat düşüşlerini izleyebilirsiniz.</p>
+        <p>Herhangi bir ürünün analiz sayfasında klasör ve hedef fiyat belirleyip <strong>"Takibe Al"</strong> butonuna tıklayarak bütçenizi ve sahte indirimleri izleyebilirsiniz.</p>
+      </div>`;
+    return;
+  }
+
+  const visible = summary.scoped;
+  if (!visible.length) {
+    els.watchlistContainer.innerHTML = `
+      <div class="empty-state">
+        <h3>"${esc(state.watchlistFolder)}" klasörü henüz boş</h3>
+        <p>Diğer klasörlerdeki ürünlerin sağındaki klasör menüsünden bu klasöre ürün taşıyabilir veya yeni ürün eklerken bu klasörü seçebilirsiniz.</p>
       </div>`;
     return;
   }
 
   els.watchlistContainer.innerHTML = `
     <div class="list-stack">
-      ${list
-        .map(
-          (w) => `
+      ${visible
+        .map((w) => {
+          const itemFolder = String(w.folder || "").trim() || "Diğer";
+          const delta =
+            typeof w.priceChangeFromInitial === "number"
+              ? w.priceChangeFromInitial
+              : typeof w.last_net_price === "number" && typeof w.initial_net_price === "number"
+                ? Math.round((w.last_net_price - w.initial_net_price) * 100) / 100
+                : 0;
+          const deltaPct =
+            typeof w.priceChangeFromInitialPct === "number"
+              ? w.priceChangeFromInitialPct
+              : w.initial_net_price > 0
+                ? Math.round((delta / w.initial_net_price) * 1000) / 10
+                : 0;
+          const deltaPill =
+            Math.abs(delta) >= 1
+              ? `<span class="watch-delta ${delta < 0 ? "down" : "up"}">${delta < 0 ? "↓" : "↑"} ${delta > 0 ? "+" : ""}${fmtTL(delta)} (${fmtPct(deltaPct)})</span>`
+              : "";
+          return `
         <div class="watch-card ${w.targetReached ? "target-hit" : ""}" data-watch-id="${esc(w.id)}">
           <img class="watch-thumb" src="${esc(w.image || "")}" alt="${esc(w.title)}" />
           <div>
+            <div class="watch-badges-row">
+              <span class="offer-pill">${esc(itemFolder)}</span>
+              ${deltaPill}
+              ${w.targetReached ? `<span class="mini-badge cheapest">✓ Hedef Fiyata Ulaştı!</span>` : ""}
+              ${renderWatchFakeDiscountBadge(w)}
+            </div>
             <h3 class="watch-title" data-open-watch="${esc(w.url)}" data-watch-title="${esc(w.title)}">${esc(w.title)}</h3>
             <div class="watch-metrics">
               <span>Güncel Net: <strong class="mono">${fmtTL(w.last_net_price)}</strong></span>
               ${w.target_price ? `<span>Hedef: <strong class="mono">${fmtTL(w.target_price)}</strong></span>` : ""}
               ${w.lowest_seen_price ? `<span>Görülen En Düşük: <strong class="mono">${fmtTL(w.lowest_seen_price)}</strong></span>` : ""}
               ${w.best_store ? `<span>Mağaza: <strong>${esc(w.best_store)}</strong></span>` : ""}
-              ${w.targetReached ? `<span class="mini-badge cheapest">✓ Hedef Fiyata Ulaştı!</span>` : ""}
             </div>
             <div class="muted-text" style="font-size:0.76rem;">Son kontrol: ${fmtDateTime(w.updated_at)}</div>
           </div>
           <div class="watch-actions">
+            <select class="select-sm watch-folder-select" data-folder-select="${esc(w.id)}" aria-label="Klasör değiştir" title="Klasöre taşı">
+              ${allFolders
+                .map((f) => `<option value="${esc(f)}" ${f === itemFolder ? "selected" : ""}>${esc(f)}</option>`)
+                .join("")}
+            </select>
             <input type="number" class="input-sm" data-target-input="${esc(w.id)}" value="${w.target_price ?? ""}" placeholder="Hedef TL" />
             <button type="button" class="btn btn-secondary btn-sm" data-save-target="${esc(w.id)}">Hedef Kaydet</button>
             <button type="button" class="btn btn-primary btn-sm" data-open-watch="${esc(w.url)}" data-watch-title="${esc(w.title)}">Analiz</button>
             <button type="button" class="btn btn-ghost btn-sm" data-delete-watch="${esc(w.id)}">Sil</button>
           </div>
-        </div>`
-        )
+        </div>`;
+        })
         .join("")}
     </div>
   `;
@@ -2455,6 +3223,29 @@ function bindEvents() {
       state.searchFilters.variantAttr = { group, value };
     }
     renderSearchResults();
+  });
+
+  // Retail vs Second-Hand / Tagged (Dolap, Gardrops, sahibinden) mode switcher
+  els.searchModeBar?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-search-mode]");
+    if (!btn) return;
+    const nextMode = btn.dataset.searchMode === "secondhand" ? "secondhand" : "retail";
+    if (state.searchMode === nextMode) return;
+    state.searchMode = nextMode;
+    renderSearchResults();
+    if (nextMode === "secondhand") {
+      loadSecondHandResults(false);
+    }
+  });
+
+  els.secondHandPanel?.addEventListener("click", (e) => {
+    if (e.target.closest("[data-refresh-secondhand]")) {
+      loadSecondHandResults(true);
+      return;
+    }
+    if (e.target.closest("[data-open-settings]")) {
+      openSettingsModal();
+    }
   });
 
   // OLED Dark Mode toggle
@@ -2796,6 +3587,56 @@ function bindEvents() {
         showToast(`Hata: ${err.message}`);
       }
     }
+  });
+
+  // Inline folder move selector on each watchlist card
+  els.watchlistContainer.addEventListener("change", async (e) => {
+    const sel = e.target.closest("[data-folder-select]");
+    if (!sel) return;
+    const id = sel.dataset.folderSelect;
+    const folder = (sel.value || "").trim() || "Diğer";
+    try {
+      const res = await apiFetch(`/api/watchlist/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folder }),
+      });
+      state.watchlist = res.items || [];
+      saveLocalWatchlist(state.watchlist);
+      renderWatchlistView();
+      showToast(`Ürün "${folder}" klasörüne taşındı.`);
+    } catch (err) {
+      showToast(`Hata: ${err.message}`);
+    }
+  });
+
+  // Watchlist folder filter bar
+  els.watchlistFolderBar?.addEventListener("click", (e) => {
+    const pill = e.target.closest("[data-watch-folder]");
+    if (!pill) return;
+    state.watchlistFolder = pill.dataset.watchFolder || "";
+    renderWatchlistView();
+  });
+
+  // Create custom watchlist folder (e.g. "Çeyiz", "Hediye", "Kışlık")
+  els.newFolderBtn?.addEventListener("click", () => {
+    const raw = window.prompt("Yeni takip klasörü adı (örn. Çeyiz, Hediye, Kışlık):");
+    if (!raw) return;
+    const clean = raw.replace(/\s+/g, " ").trim().slice(0, 40);
+    if (!clean) return;
+    const existing = getAllWatchlistFolders();
+    const match = existing.find((f) => f.toLocaleLowerCase("tr-TR") === clean.toLocaleLowerCase("tr-TR"));
+    if (match) {
+      state.watchlistFolder = match;
+      renderWatchlistView();
+      showToast(`"${match}" klasörü zaten mevcut.`);
+      return;
+    }
+    state.customFolders = [...(state.customFolders || []), clean];
+    saveLocalCustomFolders();
+    state.watchlistFolder = clean;
+    renderWatchlistView();
+    showToast(`"${clean}" klasörü oluşturuldu.`);
   });
 
   els.refreshWatchlistBtn.addEventListener("click", async () => {

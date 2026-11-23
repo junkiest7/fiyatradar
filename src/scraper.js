@@ -376,11 +376,12 @@ function attachPersonalSnapshots(detail) {
     };
   });
 
-  const histAnalysis = analyzePriceHistory(points, currentNet);
+  const histAnalysis = analyzePriceHistory(points, currentNet, null, detail.stats);
   return {
     ...detail,
     history: histAnalysis.points,
     historySummary: histAnalysis.summary,
+    fakeDiscount: histAnalysis.fakeDiscount,
     isPersonalHistory: true,
     personalHistoryCount: points.length,
   };
@@ -713,7 +714,8 @@ export async function getProductDetail(rawUrl, options = {}) {
   const historyAnalysis = analyzePriceHistory(
     rawHistory,
     offerAnalysis.stats?.minNet ?? cheapestBase,
-    fallbackHistoricalLow
+    fallbackHistoricalLow,
+    offerAnalysis.stats
   );
 
   // 7. Parse variants (other colors / storage options)
@@ -771,6 +773,7 @@ export async function getProductDetail(rawUrl, options = {}) {
     offers: offerAnalysis.offers,
     history: historyAnalysis.points,
     historySummary: historyAnalysis.summary,
+    fakeDiscount: historyAnalysis.fakeDiscount,
     verdict: historyAnalysis.verdict,
     variants,
     specs,

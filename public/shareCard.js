@@ -347,13 +347,37 @@ export async function generatePriceCard(detail, options = {}) {
   ctx.font = `600 26px ${fontMono}`;
   ctx.fillText("/100", rx + 30 + scoreNumW, y + 114);
 
+  const fd = detail.fakeDiscount;
+  const fdBadge =
+    fd?.status === "fake_discount"
+      ? { text: "⚠ Sahte İndirim Riski", fg: pal.bad, bg: pal.badSoft }
+      : fd?.status === "partial_discount"
+        ? { text: "⚡ Abartılı İndirim", fg: pal.warn, bg: pal.warnSoft }
+        : fd?.status === "inflated"
+          ? { text: "↑ Fiyat Şişirmesi", fg: pal.bad, bg: pal.badSoft }
+          : fd?.status === "genuine_discount"
+            ? { text: "✓ Gerçek İndirim", fg: pal.good, bg: pal.goodSoft }
+            : null;
+
   ctx.fillStyle = pal.ink;
   ctx.font = `700 22px ${fontSans}`;
-  const vLabelLines = wrapText(ctx, verdict.label || "Piyasa Özeti", rightW - 52, 2);
-  let vy = y + 158;
+  const vLabelLines = wrapText(ctx, verdict.label || "Piyasa Özeti", rightW - 52, fdBadge ? 1 : 2);
+  let vy = y + 156;
   for (const vl of vLabelLines) {
     ctx.fillText(vl, rx + 26, vy);
     vy += 28;
+  }
+
+  if (fdBadge) {
+    const pillY = y + 178;
+    const pillH = 36;
+    ctx.font = `700 18px ${fontSans}`;
+    const pillW = Math.min(rightW - 52, ctx.measureText(fdBadge.text).width + 26);
+    roundRect(ctx, rx + 26, pillY, pillW, pillH, 10);
+    ctx.fillStyle = fdBadge.bg;
+    ctx.fill();
+    ctx.fillStyle = fdBadge.fg;
+    ctx.fillText(fdBadge.text, rx + 39, pillY + 24);
   }
 
   // 4. Top 3 Cheapest Valid Offers Table

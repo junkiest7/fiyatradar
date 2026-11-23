@@ -196,11 +196,17 @@
         </div>
       </div>
 
+      <!-- Retail vs Second-Hand / Tagged (Dolap, Gardrops, sahibinden) Mode Switcher -->
+      <div id="searchModeBar" class="search-mode-bar" hidden></div>
+
       <!-- Quick Store / Accessory / Free-Shipping Filter Chips -->
       <div id="quickFilterBar" class="quick-filter-bar" hidden></div>
 
       <!-- Smart Capacity / Color / Size / Volume Variant Grouping Bar -->
       <div id="variantGroupBar" class="variant-group-bar" hidden></div>
+
+      <!-- Second-Hand / Tagged (Dolap, Gardrops, sahibinden) Comparison View -->
+      <div id="secondHandPanel" class="secondhand-panel" hidden></div>
 
       <div id="resultsGrid" class="results-grid"></div>
     </section>
@@ -262,13 +268,16 @@
     <section id="viewWatchlist" class="view-section" hidden>
       <div class="section-header">
         <div>
-          <h2>Takip Listem & Hedef Fiyat Alarmları</h2>
-          <p class="muted-text">Kaydettiğiniz ürünlerin canlı net fiyatlarını tek tıkla güncelleyin; her kontrolde kişisel fiyat geçmişi grafiğiniz otomatik birikir.</p>
+          <h2>Takip Listem & Bütçe Klasörleri</h2>
+          <p class="muted-text">Ürünlerinizi klasörlere ayırın, toplam bütçenizdeki değişimi izleyin ve hedef fiyat alarmlarıyla sahte indirimleri yakalayın.</p>
         </div>
         <div class="section-actions">
+          <button type="button" id="newFolderBtn" class="btn btn-secondary btn-sm">+ Yeni Klasör</button>
           <button type="button" id="refreshWatchlistBtn" class="btn btn-primary btn-sm">Tüm Fiyatları Canlı Güncelle</button>
         </div>
       </div>
+      <div id="watchlistFolderBar" class="watchlist-folder-bar" hidden></div>
+      <div id="watchlistBudgetSummary" class="watchlist-budget-grid" hidden></div>
       <div id="watchlistContainer"></div>
     </section>
 

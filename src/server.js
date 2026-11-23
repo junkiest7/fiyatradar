@@ -22,12 +22,18 @@ import {
   recordSearch,
   recordSnapshot,
   removeWatchlistItem,
-  updateWatchlistTarget,
+  summarizeWatchlistBudget,
+  updateWatchlistItem,
   upsertWatchlistItem,
 } from "./db.js";
-import { resolveBarcode, testSerperKey } from "./providers.js";
+import { resolveBarcode, searchSecondHandTurkey, testSerperKey } from "./providers.js";
 import { optimizeCart } from "./optimizer.js";
-import { extractVariantAttributes, formatTrNumber } from "./parsers.js";
+import {
+  extractVariantAttributes,
+  formatTrNumber,
+  suggestWatchlistFolder,
+  WATCHLIST_FOLDERS,
+} from "./parsers.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, "..", "public");
@@ -233,6 +239,24 @@ app.get("/api/search", async (req, res) => {
   } catch (err) {
     res.status(502).json({
       error: err.message || "Ürün araması sırasında bir hata oluştu.",
+    });
+  }
+});
+
+// Dedicated Second-Hand & Tagged Resale Search (Dolap, Gardrops, sahibinden)
+app.get("/api/search/secondhand", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    if (!q) {
+      return res.status(400).json({ error: "Arama terimi gereklidir." });
+    }
+    const refresh = req.query.refresh === "1" || req.query.refresh === "true";
+    const keys = extractReqKeys(req);
+    const data = await searchSecondHandTurkey(q, { refresh, ...keys });
+    res.json(data);
+  } catch (err) {
+    res.status(502).json({
+      error: err.message || "2. El / Etiketli araması sırasında bir hata oluştu.",
     });
   }
 });
@@ -465,9 +489,15 @@ app.delete("/api/history", (_req, res) => {
   res.json({ ok: true });
 });
 
-// Watchlist endpoints
-app.get("/api/watchlist", (_req, res) => {
-  res.json({ items: getWatchlist() });
+// Watchlist endpoints (with folders, budget summary, and fake-discount status)
+app.get("/api/watchlist", (req, res) => {
+  const items = getWatchlist();
+  const folder = String(req.query.folder || "").trim();
+  res.json({
+    items,
+    folders: WATCHLIST_FOLDERS,
+    budget: summarizeWatchlistBudget(items, folder),
+  });
 });
 
 app.post("/api/watchlist", (req, res) => {
@@ -477,34 +507,57 @@ app.post("/api/watchlist", (req, res) => {
     if (!url || !body.title) {
       return res.status(400).json({ error: "Geçerli ürün adı ve bağlantısı gereklidir." });
     }
+    const cleanTitle = String(body.title).trim();
+    const folder = String(body.folder || "").trim() || suggestWatchlistFolder(cleanTitle);
     const saved = upsertWatchlistItem({
       id: body.id,
-      title: String(body.title).trim(),
+      title: cleanTitle,
       url,
       image: body.image || "",
+      folder,
       target_price: body.target_price ? Number.parseFloat(body.target_price) : null,
+      initial_net_price: body.initial_net_price ? Number.parseFloat(body.initial_net_price) : null,
       last_net_price: body.last_net_price ? Number.parseFloat(body.last_net_price) : null,
       best_store: body.best_store || "",
       verdict_score: body.verdict_score ?? null,
       verdict_label: body.verdict_label || "",
+      fake_discount_status: body.fake_discount_status || "",
+      fake_discount_label: body.fake_discount_label || "",
       offer_count: body.offer_count || 0,
     });
-    res.status(201).json({ item: saved, items: getWatchlist() });
+    const items = getWatchlist();
+    res.status(201).json({
+      item: saved,
+      items,
+      budget: summarizeWatchlistBudget(items),
+    });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
 app.patch("/api/watchlist/:id", (req, res) => {
-  const targetPrice =
-    req.body?.target_price !== null && req.body?.target_price !== undefined && req.body?.target_price !== ""
-      ? Number.parseFloat(req.body.target_price)
-      : null;
-  const updated = updateWatchlistTarget(req.params.id, targetPrice);
+  const updates = {};
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, "target_price")) {
+    updates.target_price =
+      req.body?.target_price !== null && req.body?.target_price !== undefined && req.body?.target_price !== ""
+        ? Number.parseFloat(req.body.target_price)
+        : null;
+  }
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, "folder")) {
+    updates.folder = String(req.body?.folder || "").trim() || "Diğer";
+  }
+
+  const updated = updateWatchlistItem(req.params.id, updates);
   if (!updated) {
     return res.status(404).json({ error: "Takip edilen ürün bulunamadı." });
   }
-  res.json({ item: updated, items: getWatchlist() });
+  const items = getWatchlist();
+  res.json({
+    item: updated,
+    items,
+    budget: summarizeWatchlistBudget(items),
+  });
 });
 
 app.delete("/api/watchlist/:id", (req, res) => {
@@ -512,7 +565,8 @@ app.delete("/api/watchlist/:id", (req, res) => {
   if (!removed) {
     return res.status(404).json({ error: "Takip edilen ürün bulunamadı." });
   }
-  res.json({ ok: true, items: getWatchlist() });
+  const items = getWatchlist();
+  res.json({ ok: true, items, budget: summarizeWatchlistBudget(items) });
 });
 
 // Live batch refresh of all watched items (with automatic API key forwarding + virtual URL re-hydration)
@@ -533,11 +587,14 @@ app.post("/api/watchlist/refresh", async (req, res) => {
           title: detail.title,
           url: item.url,
           image: detail.image,
+          folder: item.folder,
           target_price: item.target_price,
           last_net_price: detail.stats?.minNet ?? detail.lowPrice,
           best_store: detail.picks?.cheapestNet?.store || "",
           verdict_score: detail.verdict?.score ?? null,
           verdict_label: detail.verdict?.label || "",
+          fake_discount_status: detail.fakeDiscount?.status || "",
+          fake_discount_label: detail.fakeDiscount?.label || "",
           offer_count: detail.totalOfferCount,
         });
         results.push({ id: item.id, ok: true });
@@ -545,7 +602,12 @@ app.post("/api/watchlist/refresh", async (req, res) => {
         results.push({ id: item.id, ok: false, error: err.message });
       }
     }
-    res.json({ refreshed: results, items: getWatchlist() });
+    const items = getWatchlist();
+    res.json({
+      refreshed: results,
+      items,
+      budget: summarizeWatchlistBudget(items),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
