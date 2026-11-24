@@ -196,12 +196,6 @@ const els = {
   prefInstallmentMonths: $("prefInstallmentMonths"),
   prefInstallmentRate: $("prefInstallmentRate"),
   settingsPushBox: $("settingsPushBox"),
-  exportBackupBtn: $("exportBackupBtn"),
-  importBackupBtn: $("importBackupBtn"),
-  importBackupInput: $("importBackupInput"),
-  settingsClearHistoryBtn: $("settingsClearHistoryBtn"),
-  refreshAppCacheBtn: $("refreshAppCacheBtn"),
-  resetAllDataBtn: $("resetAllDataBtn"),
   settingsLiveStatus: $("settingsLiveStatus"),
   scannerModal: $("scannerModal"),
   closeScannerBtn: $("closeScannerBtn"),
@@ -4058,28 +4052,6 @@ function bindEvents() {
     if (state.currentDetail && state.activeView === "detail") renderDetailView();
     showToast(`Varsayılan vade oranı: %${rate}`);
   });
-
-  els.exportBackupBtn?.addEventListener("click", exportAppBackupJson);
-  els.importBackupBtn?.addEventListener("click", () => els.importBackupInput?.click());
-  els.importBackupInput?.addEventListener("change", (e) => {
-    const file = e.target.files?.[0];
-    if (file) importAppBackupJson(file);
-    e.target.value = "";
-  });
-
-  els.settingsClearHistoryBtn?.addEventListener("click", async () => {
-    try {
-      await apiFetch("/api/history", { method: "DELETE" });
-      state.history = [];
-      if (state.activeView === "history") renderHistory();
-      showToast("Arama geçmişi temizlendi.");
-    } catch (err) {
-      showToast(err.message || "Geçmiş temizlenemedi.");
-    }
-  });
-
-  els.refreshAppCacheBtn?.addEventListener("click", refreshAppCacheAndReload);
-  els.resetAllDataBtn?.addEventListener("click", resetAllLocalAppData);
 }
 
 // ============================================================================
@@ -4436,8 +4408,7 @@ async function renderSettingsPushBox() {
     <div class="settings-btn-grid">
       ${
         active
-          ? `<button type="button" id="settingsTestPushBtn" class="btn btn-secondary btn-sm">Test Bildirimi Gönder</button>
-             <button type="button" id="settingsDisablePushBtn" class="btn btn-ghost btn-sm">Bildirimleri Kapat</button>`
+          ? `<button type="button" id="settingsDisablePushBtn" class="btn btn-ghost btn-sm" style="grid-column:1/-1;">Bildirimleri Kapat</button>`
           : `<button type="button" id="settingsEnablePushBtn" class="btn btn-primary btn-sm" style="grid-column:1/-1;">Bildirimleri Aç</button>`
       }
     </div>
@@ -4459,19 +4430,6 @@ async function renderSettingsPushBox() {
     }
   });
 
-  $("settingsTestPushBtn")?.addEventListener("click", async () => {
-    if (state.pushBusy) return;
-    state.pushBusy = true;
-    try {
-      await sendTestPush(apiFetch);
-      showToast("Test bildirimi gönderildi!");
-    } catch (err) {
-      showToast(err.message || "Test bildirimi gönderilemedi.");
-    } finally {
-      state.pushBusy = false;
-    }
-  });
-
   $("settingsDisablePushBtn")?.addEventListener("click", async () => {
     if (state.pushBusy) return;
     state.pushBusy = true;
@@ -4487,131 +4445,6 @@ async function renderSettingsPushBox() {
       state.pushBusy = false;
     }
   });
-}
-
-function exportAppBackupJson() {
-  try {
-    const payload = {
-      app: "FiyatRadar",
-      version: 14,
-      exportedAt: new Date().toISOString(),
-      prefs: state.prefs,
-      watchlist: state.watchlist.length ? state.watchlist : loadLocalWatchlist(),
-      customFolders: state.customFolders,
-      cart: state.cart,
-      compareBasket: state.compareBasket,
-      snapshots: JSON.parse(localStorage.getItem("fiyatradar_snapshots") || "{}"),
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
-    const dlUrl = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    const dateTag = new Date().toISOString().slice(0, 10);
-    a.href = dlUrl;
-    a.download = `fiyatradar-yedek-${dateTag}.json`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(dlUrl), 1500);
-    showToast("Yedek dosyası (JSON) indirildi.");
-  } catch {
-    showToast("Yedek dosyası oluşturulamadı.");
-  }
-}
-
-async function importAppBackupJson(file) {
-  try {
-    const text = await file.text();
-    const data = JSON.parse(text);
-    if (!data || typeof data !== "object") {
-      throw new Error("Geçersiz yedek dosyası.");
-    }
-
-    if (data.prefs && typeof data.prefs === "object") {
-      saveUserPrefs(data.prefs);
-      setThemePreference(state.prefs.themeMode);
-      if (els.searchSortSelect && state.prefs.defaultSort) {
-        els.searchSortSelect.value = state.prefs.defaultSort;
-      }
-    }
-    if (Array.isArray(data.customFolders)) {
-      state.customFolders = data.customFolders.filter((f) => typeof f === "string" && f.trim());
-      saveLocalCustomFolders();
-    }
-    if (Array.isArray(data.cart)) {
-      state.cart = data.cart.slice(0, 20);
-      saveLocalCart();
-      updateCartBadges();
-    }
-    if (Array.isArray(data.compareBasket)) {
-      state.compareBasket = data.compareBasket.slice(0, 5);
-      saveLocalCompare();
-      updateCompareBadges();
-    }
-    if (data.snapshots && typeof data.snapshots === "object") {
-      localStorage.setItem("fiyatradar_snapshots", JSON.stringify(data.snapshots));
-    }
-    if (Array.isArray(data.watchlist) && data.watchlist.length) {
-      saveLocalWatchlist(data.watchlist);
-      await Promise.all(
-        data.watchlist.slice(0, 50).map((w) =>
-          apiFetch("/api/watchlist", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              id: w.id,
-              title: w.title,
-              url: w.url,
-              image: w.image || "",
-              folder: w.folder || "",
-              targetPrice: w.target_price ?? null,
-              lastNetPrice: w.last_net_price ?? null,
-              lastStore: w.last_store || "",
-            }),
-          }).catch(() => {})
-        )
-      );
-      await loadWatchlist();
-    }
-
-    syncSettingsModalUI();
-    showToast("Yedek başarıyla geri yüklendi!");
-  } catch (err) {
-    showToast(err.message || "Yedek dosyası okunamadı.");
-  }
-}
-
-async function refreshAppCacheAndReload() {
-  showToast("Önbellek temizleniyor ve uygulama yenileniyor...");
-  try {
-    if ("caches" in window) {
-      const keys = await caches.keys();
-      await Promise.all(keys.map((k) => caches.delete(k)));
-    }
-    if ("serviceWorker" in navigator) {
-      const regs = await navigator.serviceWorker.getRegistrations();
-      await Promise.all(regs.map((r) => r.update().catch(() => {})));
-    }
-  } catch {
-    // Non-fatal
-  }
-  setTimeout(() => window.location.reload(), 350);
-}
-
-function resetAllLocalAppData() {
-  const confirmed = window.confirm(
-    "Sepet, karşılaştırma listesi, kişisel fiyat kayıtları ve uygulama tercihleriniz sıfırlanacak. Devam edilsin mi?"
-  );
-  if (!confirmed) return;
-  try {
-    const keys = [];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith("fiyatradar_")) keys.push(k);
-    }
-    keys.forEach((k) => localStorage.removeItem(k));
-  } catch {
-    // Ignore
-  }
-  showToast("Tüm yerel veriler sıfırlandı. Yenileniyor...");
-  setTimeout(() => window.location.reload(), 450);
 }
 
 function updateLiveNetworkStatus(online = true) {
