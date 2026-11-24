@@ -408,12 +408,12 @@ export function transliterateTr(str) {
 }
 
 const ACCESSORY_RULES = [
-  { keyword: "kilif", pattern: /\b(kilif|kilifi|kiliflari|case|cover|kapak)\b/i },
+  { keyword: "kilif", pattern: /\b(kilif|kilifi|kiliflari|case|cover|kapak|airpodsluk)\b/i },
   { keyword: "ekran koruyucu", pattern: /\b(ekran\s+koruyucu|hayalet\s+cam|temperli\s+cam|kirilmaz\s+cam|lens\s+koruyucu|kamera\s+koruyucu)\b/i },
   { keyword: "kordon", pattern: /\b(kordon|kayis|kayisi|bileklik\s+kayisi)\b/i },
   { keyword: "pisirme kagidi", pattern: /\b(pisirme\s+kagidi|silikon\s+kalip|silikon\s+kalibi|izgara\s+seti)\b/i },
   { keyword: "gozluk ipi", pattern: /\b(gozluk\s+ipi|gozluk\s+zinciri|gozluk\s+kabi|gozluk\s+kutusu|temizleme\s+spreyi|silme\s+bezi|temizleme\s+bezi)\b/i },
-  { keyword: "yedek parca", pattern: /\b(yedek\s+parca|yedek\s+baslik|yedek\s+basligi|yedek\s+filtre|batarya\s+pili|yedek\s+cam|aksesuar\s+seti|bos\s+kutu)\b/i },
+  { keyword: "yedek parca", pattern: /\b(yedek\s+parca|yedek\s+baslik|yedek\s+basligi|yedek\s+filtre|batarya\s+pili|yedek\s+cam|aksesuar\s+seti|aksesuari|aparati|pervane\s+aparati|bos\s+kutu)\b/i },
   { keyword: "sarj", pattern: /\b(sarj\s+kablosu|sarj\s+aleti|adaptor|powerbank|arac\s+tutucu|masa\s+standi|stant)\b/i },
   { keyword: "ayakkabi bakim", pattern: /\b(ayakkabi\s+kalibi|tabanlik|bagcik|ayakkabi\s+boyasi|ayakkabi\s+torbasi)\b/i },
 ];

@@ -36,9 +36,34 @@ const DEFAULT_HEADERS = {
 
 // Simple in-memory TTL cache
 const cache = new Map();
-const SEARCH_TTL_MS = 5 * 60 * 1000;
-const DETAIL_TTL_MS = 3 * 60 * 1000;
-const SUGGEST_TTL_MS = 10 * 60 * 1000;
+const SEARCH_TTL_MS = 15 * 60 * 1000;
+const DETAIL_TTL_MS = 5 * 60 * 1000;
+const SUGGEST_TTL_MS = 15 * 60 * 1000;
+let serperRoundRobinIdx = 0;
+
+function getSerperKeyPool(clientKey = "") {
+  const keys = [];
+  const pushUnique = (raw) => {
+    const k = String(raw || "").trim();
+    if (k && !keys.includes(k)) keys.push(k);
+  };
+  pushUnique(clientKey);
+  const envList = [
+    ...String(process.env.SERPER_API_KEYS || "").split(/[\s,;]+/),
+    String(process.env.SERPER_API_KEY || ""),
+  ]
+    .map((k) => k.trim())
+    .filter(Boolean);
+  if (envList.length > 1) {
+    const start = serperRoundRobinIdx++ % envList.length;
+    for (let i = 0; i < envList.length; i++) {
+      pushUnique(envList[(start + i) % envList.length]);
+    }
+  } else {
+    envList.forEach(pushUnique);
+  }
+  return keys;
+}
 
 function getCached(key) {
   const entry = cache.get(key);
@@ -51,7 +76,7 @@ function getCached(key) {
 }
 
 function setCached(key, data, ttlMs) {
-  if (cache.size > 250) {
+  if (cache.size > 400) {
     // Evict oldest entry
     const firstKey = cache.keys().next().value;
     cache.delete(firstKey);
@@ -65,7 +90,7 @@ function setCached(key, data, ttlMs) {
 export function normalizeProductUrl(input) {
   if (!input || typeof input !== "string") return null;
   const trimmed = input.trim();
-  if (/^virtual:(serper|serpapi|mf|migros):/.test(trimmed)) {
+  if (/^virtual:(serper|serpapi|mf|migros|trnet):/.test(trimmed)) {
     return trimmed;
   }
   if (trimmed.startsWith("/")) {
@@ -141,7 +166,8 @@ export async function searchProducts(query, options = {}) {
     throw new Error("Arama terimi boş olamaz.");
   }
 
-  const serperKey = (options.serperKey || process.env.SERPER_API_KEY || "").trim();
+  const serperKeys = getSerperKeyPool(options.serperKey);
+  const serperKey = serperKeys[0] || "";
   const serpApiKey = (options.serpApiKey || process.env.SERPAPI_KEY || "").trim();
 
   // Universal Turkish Store Link Resolver (Trendyol, ty.gl, Hepsiburada, Amazon TR, Stradivarius, Zara, n11, etc.)
@@ -185,16 +211,22 @@ export async function searchProducts(query, options = {}) {
     };
   }
 
-  // Priority 1: Google Türkiye Search via Serper.dev (works for ALL Turkish stores incl. fashion & electronics!)
-  if (serperKey) {
+  // Priority 1: Google Türkiye Search via Serper.dev (supports multi-key rotation & failover!)
+  if (serperKeys.length > 0) {
     const cKey = `serper-tr:${q.toLocaleLowerCase("tr-TR")}`;
     if (!options.refresh) {
       const cached = getCached(cKey);
       if (cached) return { ...cached, cached: true, resolvedFromLink };
     }
-    const result = await searchSerperTurkey(q, serperKey);
-    setCached(cKey, result, SEARCH_TTL_MS);
-    return { ...result, resolvedFromLink };
+    for (const key of serperKeys) {
+      try {
+        const result = await searchSerperTurkey(q, key);
+        setCached(cKey, result, SEARCH_TTL_MS);
+        return { ...result, resolvedFromLink };
+      } catch {
+        // Rotate to next key or fall through to zero-key live engine
+      }
+    }
   }
 
   // Priority 2: Google Türkiye Search via SerpAPI
@@ -204,9 +236,13 @@ export async function searchProducts(query, options = {}) {
       const cached = getCached(cKey);
       if (cached) return { ...cached, cached: true, resolvedFromLink };
     }
-    const result = await searchSerpApiTurkey(q, serpApiKey);
-    setCached(cKey, result, SEARCH_TTL_MS);
-    return { ...result, resolvedFromLink };
+    try {
+      const result = await searchSerpApiTurkey(q, serpApiKey);
+      setCached(cKey, result, SEARCH_TTL_MS);
+      return { ...result, resolvedFromLink };
+    } catch {
+      // Fall through to zero-key live engine
+    }
   }
 
   const page = Math.max(1, Number.parseInt(options.page, 10) || 1);
@@ -219,7 +255,7 @@ export async function searchProducts(query, options = {}) {
     }
   }
 
-  // Priority 3: Direct Akakce live search, with automatic fallback on 403/timeout (e.g. Render cloud IP)
+  // Priority 3: Direct Akakce live search, with automatic cloud-proof Zero-Key Turkish Store Network fallback
   let html;
   try {
     const searchUrl = `${BASE_URL}/arama/?q=${encodeURIComponent(q)}${page > 1 ? `&p=${page}` : ""}`;
@@ -227,9 +263,11 @@ export async function searchProducts(query, options = {}) {
   } catch (akakceErr) {
     const fallback = await searchOfficialFallback(q);
     fallback.fallbackReason = akakceErr.message || "Akakçe erişimi kısıtlandı";
-    fallback.fallbackNotice =
-      "Bulut sunucu IP'si nedeniyle Akakçe doğrudan erişimi kısıtlandı; şu an Migros Elektronik ve T.C. Market Fiyatı resmi kaynakları taranıyor. Trendyol, Hepsiburada, Amazon TR, n11, MediaMarkt dahil 50+ mağazanın tamamı için Ayarlar'dan ücretsiz Serper API anahtarı (2.500 ücretsiz arama) ekleyebilirsiniz.";
-    setCached(cacheKey, fallback, 2 * 60 * 1000);
+    // Keep consumer UX completely clean when zero-key Turkish stores return results
+    fallback.fallbackNotice = fallback.totalFound > 0
+      ? ""
+      : "Canlı Türkiye mağaza ağında bu arama için eşleşme bulunamadı; daha kısa bir marka/model adıyla tekrar deneyebilirsiniz.";
+    setCached(cacheKey, fallback, 5 * 60 * 1000);
     return { ...fallback, resolvedFromLink };
   }
 
@@ -315,7 +353,8 @@ function extractQueryFromVirtualUrl(vUrl, fallbackTitle = "") {
   // virtual:serper:all:<encodedQuery>
   // virtual:serper:<encodedQuery>:<idx>
   // virtual:serper:cat:<encodedQuery>:<id>
-  if ((parts[1] === "serper" || parts[1] === "serpapi") && parts.length >= 4) {
+  // virtual:trnet:<encodedQuery>:<idx>
+  if ((parts[1] === "serper" || parts[1] === "serpapi" || parts[1] === "trnet") && parts.length >= 4) {
     const raw = parts[2] === "all" || parts[2] === "cat" ? parts[3] : parts[2];
     try {
       const decoded = decodeURIComponent(raw).trim();

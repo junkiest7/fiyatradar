@@ -24,6 +24,8 @@ import {
   extractOrganicPriceInfo,
   getVirtualDetail,
   isSecondHandOffer,
+  matchesZeroKeyQuery,
+  mergeZeroKeyStoreItems,
   pickBestProductImage,
   resolveBarcode,
   resolveStoreFromUrl,
@@ -1013,5 +1015,75 @@ test("v9 Feature 7: extractSharedQuery extracts Turkish store links or text from
   );
   assert.equal(extractSharedQuery({}), "");
 });
+
+test("v11 Zero-Key Turkey Retail Network: strict relevance guard, cross-store SKU merging, and live zero-key search", async () => {
+  // 1. Strict relevance guard rejects numeric-only / catalog-default false positives
+  assert.equal(matchesZeroKeyQuery("Timberland 15 cm Su Geçirmez Bot", "Timberland", "TB1A", "iphone 15").ok, false);
+  assert.equal(matchesZeroKeyQuery("Rowenta 15 in 1 Tıraş Makinesi", "Rowenta", "TN944", "iphone 15").ok, false);
+  assert.equal(matchesZeroKeyQuery("Crocs Medium Eva Tote Çanta", "Crocs", "CZFB0002", "adidas erkek ayakkabı").ok, false);
+
+  // Accepts true matches & Turkish synonyms (ayakkabı <-> sneaker / koşu ayakkabısı)
+  assert.equal(matchesZeroKeyQuery("adidas Hyperboost Edge Erkek Beyaz Koşu Ayakkabısı", "adidas", "KI4392", "adidas erkek ayakkabı").ok, true);
+  assert.equal(matchesZeroKeyQuery("Adidas X Wales Bonner Erkek Deri Sneaker", "Adidas", "", "adidas erkek ayakkabı").ok, true);
+  assert.equal(matchesZeroKeyQuery("Apple Airpods 4. Nesil MXP63TU/A", "Apple", "MXP63TU", "airpods").ok, true);
+
+  // 2. Cross-store SKU merging combines identical model across SuperStep + Intersport into 1 card with 2 offers
+  const merged = mergeZeroKeyStoreItems(
+    [
+      {
+        id: "ss-1",
+        storeName: "SuperStep",
+        title: "adidas Hyperboost Edge Erkek Beyaz Koşu Ayakkabısı",
+        brand: "adidas",
+        code: "KI4392",
+        price: 13599,
+        listPrice: 13599,
+        image: "https://example.com/a.jpg",
+        productUrl: "https://www.superstep.com.tr/urun/adidas-hyperboost/ki4392/",
+        inStock: true,
+        freeShipThreshold: 2500,
+        category: "Ayakkabı & Spor",
+        relevanceScore: 130,
+      },
+      {
+        id: "is-1",
+        storeName: "Intersport",
+        title: "adidas Hyperboost Edge Erkek Beyaz Koşu Ayakkabısı",
+        brand: "adidas",
+        code: "KI4392",
+        price: 9519,
+        listPrice: 13599,
+        image: "https://example.com/a.jpg",
+        productUrl: "https://www.intersport.com.tr/urun/adidas-hyperboost/ki4392/",
+        inStock: true,
+        freeShipThreshold: 2500,
+        category: "Spor & Ayakkabı",
+        relevanceScore: 130,
+      },
+    ],
+    "adidas erkek ayakkabı"
+  );
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].offerCount, 2);
+  assert.equal(merged[0].lowestPrice, 9519);
+  assert.ok(merged[0].url.startsWith("virtual:trnet:"));
+  const det = getVirtualDetail(merged[0].url);
+  assert.ok(det);
+  assert.equal(det.offers.length, 2);
+  assert.equal(det.picks.cheapestNet.store, "Intersport");
+  assert.equal(det.stats.minNet, 9519);
+  assert.equal(det.stats.maxNet, 13599);
+
+  // 3. Live zero-key cloud-proof search for "adidas erkek ayakkabı" returns real Turkish store products!
+  const live = await searchOfficialFallback("adidas erkek ayakkabı");
+  assert.ok(live.totalFound >= 5, `Expected >= 5 live zero-key results for adidas erkek ayakkabı, got ${live.totalFound}`);
+  assert.ok(live.products[0].lowestPrice > 0);
+  assert.ok(live.products[0].externalUrl?.startsWith("https://"));
+  const liveDetail = await getProductDetail(live.products[0].url);
+  assert.ok(liveDetail.offers.length >= 1);
+  assert.ok(liveDetail.trustSummary);
+});
+
 
 

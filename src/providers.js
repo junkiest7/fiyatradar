@@ -10,6 +10,7 @@
  * 4. Migros Elektronik & Sanal Market REST API (Zero-key official JSON API)
  */
 
+import * as cheerio from "cheerio";
 import {
   areColorsCompatible,
   extractColorFromText,
@@ -1988,39 +1989,599 @@ export async function resolveBarcode(rawCode, options = {}) {
   };
 }
 
+const ZERO_KEY_STOP_WORDS = new Set([
+  "ve",
+  "ile",
+  "icin",
+  "en",
+  "ucuz",
+  "fiyat",
+  "fiyati",
+  "fiyatlari",
+  "tl",
+  "online",
+  "satis",
+  "orijinal",
+  "yeni",
+  "sezon",
+  "modelleri",
+  "modeli",
+]);
+
+const ZERO_KEY_GENERIC_WORDS = new Set([
+  "erkek",
+  "kadin",
+  "cocuk",
+  "unisex",
+  "bebek",
+  "spor",
+  "gunluk",
+  "klasik",
+  "siyah",
+  "beyaz",
+  "mavi",
+  "kirmizi",
+  "yesil",
+  "gri",
+  "bej",
+  "kahverengi",
+  "lacivert",
+  "pembe",
+  "sari",
+  "mor",
+  "turuncu",
+  "buyuk",
+  "kucuk",
+]);
+
+const ZERO_KEY_SYNONYMS = {
+  ayakkabi: ["ayakkabi", "sneaker", "bot", "sandalet", "terlik", "krampon", "loafer", "babet", "stiletto", "cizme"],
+  sneaker: ["sneaker", "ayakkabi"],
+  parfum: ["parfum", "edp", "edt", "elixir", "cologne", "eau"],
+  gozluk: ["gozluk", "sunglass"],
+  kulaklik: ["kulaklik", "airpods", "earbuds", "headphone", "buds"],
+  supurge: ["supurge", "vacuum"],
+  airfryer: ["airfryer", "fritoz", "easy fry", "actifry"],
+  fritoz: ["fritoz", "airfryer", "easy fry"],
+};
+
+const AKINON_TR_STORES = [
+  { name: "SuperStep", baseUrl: "https://www.superstep.com.tr", freeShipThreshold: 2500, category: "Ayakkabı & Spor" },
+  { name: "FashFed", baseUrl: "https://www.fashfed.com", freeShipThreshold: 2500, category: "Moda & Ayakkabı" },
+  { name: "Intersport", baseUrl: "https://www.intersport.com.tr", freeShipThreshold: 2500, category: "Spor & Ayakkabı" },
+  { name: "Sportive", baseUrl: "https://www.sportive.com.tr", freeShipThreshold: 1500, category: "Spor & Ayakkabı" },
+  { name: "Sporjinal", baseUrl: "https://www.sporjinal.com", freeShipThreshold: 1500, category: "Spor & Ayakkabı" },
+  { name: "Koton", baseUrl: "https://www.koton.com", freeShipThreshold: 1000, category: "Moda & Giyim" },
+  { name: "Tefal Türkiye", baseUrl: "https://www.tefal.com.tr", freeShipThreshold: 1500, category: "Küçük Ev Aletleri" },
+];
+
+function normalizeZeroKeyText(str) {
+  return transliterateTr(String(str || ""))
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenMatchesHaystack(token, haystack, hayTokens) {
+  if (!token) return false;
+  const syns = ZERO_KEY_SYNONYMS[token] || [token];
+  for (const s of syns) {
+    if (s.includes(" ")) {
+      if (haystack.includes(s)) return true;
+      continue;
+    }
+    if (/^\d+$/.test(s)) {
+      if (hayTokens.has(s)) return true;
+      continue;
+    }
+    if (s.length >= 4) {
+      // Allow Turkish inflections (e.g., ayakkabi -> ayakkabisi, parfum -> parfumu)
+      const stem = s.length >= 6 && /[iu]$/.test(s) ? s.slice(0, -1) : s;
+      if (haystack.includes(stem)) return true;
+    } else if (hayTokens.has(s)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
- * Provider 3 (Zero-Key Official Cloud-Proof Fallback):
- * Combines:
- * - T.C. Ticaret Bakanlığı / TÜBİTAK Market Fiyatı API (A101, BİM, CarrefourSA, Migros, ŞOK, Hakmar, Tarım Kredi)
- * - Migros Elektronik REST API
- * - Migros Sanal Market REST API
+ * Strict relevance filter for zero-key multi-store search results.
+ * Prevents catalog-default leaks (e.g., shoes or blenders showing up for "iphone 15").
+ */
+export function matchesZeroKeyQuery(title, brand, code, query) {
+  const qNorm = normalizeZeroKeyText(query);
+  if (!qNorm) return { ok: false, score: 0 };
+
+  const qTokens = qNorm
+    .split(" ")
+    .filter((t) => t.length >= 2 && !ZERO_KEY_STOP_WORDS.has(t));
+  if (!qTokens.length) return { ok: true, score: 1 };
+
+  const haystack = normalizeZeroKeyText(`${brand || ""} ${title || ""} ${code || ""}`);
+  if (!haystack) return { ok: false, score: 0 };
+  const hayTokens = new Set(haystack.split(" "));
+
+  const alphaTokens = qTokens.filter((t) => /[a-z]{2,}/.test(t));
+  const coreAlphaTokens = alphaTokens.filter((t) => !ZERO_KEY_GENERIC_WORDS.has(t));
+
+  let matchedCount = 0;
+  let alphaMatched = 0;
+  let coreAlphaMatched = 0;
+
+  for (const tok of qTokens) {
+    if (tokenMatchesHaystack(tok, haystack, hayTokens)) {
+      matchedCount++;
+      if (/[a-z]{2,}/.test(tok)) {
+        alphaMatched++;
+        if (!ZERO_KEY_GENERIC_WORDS.has(tok)) coreAlphaMatched++;
+      }
+    }
+  }
+
+  // Never allow a pure numeric token match (like "15" in "15 cm bot") when query has alphabetic terms
+  if (alphaTokens.length > 0 && alphaMatched === 0) return { ok: false, score: 0 };
+  if (coreAlphaTokens.length > 0 && coreAlphaMatched === 0) return { ok: false, score: 0 };
+
+  // Primary brand / lead product keyword must match when specific
+  const leadCore = coreAlphaTokens[0];
+  if (leadCore && leadCore.length >= 3 && !tokenMatchesHaystack(leadCore, haystack, hayTokens)) {
+    return { ok: false, score: 0 };
+  }
+
+  const ratio = matchedCount / qTokens.length;
+  const minRatio = qTokens.length <= 2 ? 0.99 : 0.65;
+  if (ratio < minRatio) return { ok: false, score: 0 };
+
+  return { ok: true, score: Math.round((ratio * 100 + coreAlphaMatched * 15) * 10) / 10 };
+}
+
+/**
+ * Extracts a canonical manufacturer model/style code (e.g., KI4392, IF4466, HP9426, MXP63TU)
+ * so identical items across SuperStep, FashFed, Intersport, Sportive, etc. merge into one card.
+ */
+function extractModelStyleCode(code, title) {
+  const candidates = [String(code || "").trim(), ...String(title || "").split(/[\s/,()\-]+/)];
+  for (const raw of candidates) {
+    const clean = raw.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+    if (clean.length < 5 || clean.length > 12) continue;
+    if (!/[A-Z]/.test(clean) || !/\d/.test(clean)) continue;
+    // Skip storage, weight, volume, dimensions, or years
+    if (/^\d+(GB|TB|MB|ML|LT|KG|GR|CM|MM|HZ|MAH|W|V|INCH|IN)$/.test(clean)) continue;
+    if (/^(19|20)\d{2}/.test(clean)) continue;
+    if (/^\d{1,3}[A-Z]{1,2}$/.test(clean)) continue;
+    return clean;
+  }
+  return "";
+}
+
+async function fetchAkinonStore(store, query) {
+  const url = `${store.baseUrl}/list/?search_text=${encodeURIComponent(query)}&format=json`;
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": UA,
+      Accept: "application/json",
+      "Accept-Language": "tr-TR,tr;q=0.9",
+    },
+    signal: AbortSignal.timeout(5500),
+  });
+  if (!res.ok) return [];
+  const text = await res.text();
+  if (!text.trim().startsWith("{")) return [];
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  const list = Array.isArray(data.products) ? data.products : [];
+  const out = [];
+
+  for (const p of list.slice(0, 32)) {
+    const title = String(p?.name || "").replace(/\s+/g, " ").trim();
+    const price = typeof p?.price === "number" ? p.price : parseTrPrice(p?.price);
+    if (!title || !price || price <= 0) continue;
+
+    const brand = String(p?.attributes?.brand || p?.attributes_kwargs?.brand?.label || "").trim();
+    const rawCode = String(p?.base_code || p?.sku || "").trim();
+    const rel = matchesZeroKeyQuery(title, brand, rawCode, query);
+    if (!rel.ok) continue;
+
+    const retailPrice = typeof p?.retail_price === "number" ? p.retail_price : parseTrPrice(p?.retail_price);
+    const absPath = String(p?.absolute_url || "").trim();
+    const productUrl = absPath.startsWith("http")
+      ? absPath
+      : absPath
+        ? `${store.baseUrl}${absPath.startsWith("/") ? "" : "/"}${absPath}`
+        : `${store.baseUrl}/list/?search_text=${encodeURIComponent(query)}`;
+    const image = String(p?.productimage_set?.[0]?.image || "").trim();
+
+    out.push({
+      id: `${store.name.toLowerCase().replace(/[^a-z0-9]/g, "")}-${p.pk || out.length}`,
+      storeName: store.name,
+      title,
+      brand,
+      code: extractModelStyleCode(rawCode, title),
+      price: Math.round(price * 100) / 100,
+      listPrice: retailPrice && retailPrice > price ? Math.round(retailPrice * 100) / 100 : null,
+      image,
+      productUrl,
+      inStock: p?.in_stock !== false,
+      freeShipThreshold: store.freeShipThreshold,
+      deliveryLabel: "Hızlı Kargo (1-3 gün)",
+      deliveryDays: 2,
+      category: store.category,
+      relevanceScore: rel.score,
+    });
+  }
+  return out;
+}
+
+async function fetchBeymen(query) {
+  const url = `https://www.beymen.com/tr/search?q=${encodeURIComponent(query)}`;
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": UA,
+      Accept: "text/html,application/xhtml+xml",
+      "Accept-Language": "tr-TR,tr;q=0.9",
+    },
+    signal: AbortSignal.timeout(5500),
+  });
+  if (!res.ok) return [];
+  const html = await res.text();
+  if (/Just a moment|cf-browser-verification|challenge-platform/i.test(html)) return [];
+
+  const $ = cheerio.load(html);
+  const out = [];
+  const seen = new Set();
+
+  $(".m-productCard").slice(0, 28).each((idx, el) => {
+    const $el = $(el);
+    const brand = $el.find(".m-productCard__title").first().text().replace(/\s+/g, " ").trim();
+    // Desc often duplicates text across mobile/desktop spans; deduplicate lines cleanly
+    const rawDesc = $el.find(".m-productCard__desc").first().text().trim();
+    const descParts = rawDesc
+      .split(/\n+/)
+      .map((s) => s.replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+    const desc = descParts[0] || "";
+    const title = brand && desc && !desc.toLowerCase().startsWith(brand.toLowerCase()) ? `${brand} ${desc}` : desc || brand;
+    const priceText = $el.find(".m-productCard__newPrice").first().text().trim();
+    const oldPriceText = $el.find(".m-productCard__oldPrice").first().text().trim();
+    const price = parseTrPrice(priceText);
+    if (!title || !price || price <= 0) return;
+
+    const rel = matchesZeroKeyQuery(title, brand, "", query);
+    if (!rel.ok) return;
+
+    const href = $el.find("a").first().attr("href") || "";
+    const productUrl = href.startsWith("http")
+      ? href
+      : href
+        ? `https://www.beymen.com${href.startsWith("/") ? "" : "/"}${href}`
+        : url;
+    if (seen.has(productUrl)) return;
+    seen.add(productUrl);
+
+    let image = $el.find("img").first().attr("data-src") || $el.find("img").first().attr("src") || "";
+    if (image.startsWith("//")) image = `https:${image}`;
+    const listPrice = parseTrPrice(oldPriceText);
+
+    out.push({
+      id: `beymen-${idx + 1}`,
+      storeName: "Beymen",
+      title,
+      brand,
+      code: extractModelStyleCode("", title),
+      price,
+      listPrice: listPrice && listPrice > price ? listPrice : null,
+      image,
+      productUrl,
+      inStock: true,
+      freeShipThreshold: 1500,
+      deliveryLabel: "Hızlı Kargo (1-3 gün)",
+      deliveryDays: 2,
+      category: "Beymen",
+      relevanceScore: rel.score,
+    });
+  });
+
+  return out;
+}
+
+async function fetchDrStore(query) {
+  const url = `https://www.dr.com.tr/search?q=${encodeURIComponent(query)}`;
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": UA,
+      Accept: "text/html,application/xhtml+xml",
+      "Accept-Language": "tr-TR,tr;q=0.9",
+    },
+    signal: AbortSignal.timeout(5500),
+  });
+  if (!res.ok) return [];
+  const html = await res.text();
+  if (/Just a moment|cf-browser-verification|challenge-platform/i.test(html)) return [];
+
+  const $ = cheerio.load(html);
+  const out = [];
+  const seen = new Set();
+
+  $(".prd").slice(0, 28).each((idx, el) => {
+    const $el = $(el);
+    let gtm = null;
+    const rawGtm = $el.attr("data-gtm");
+    if (rawGtm) {
+      try {
+        gtm = JSON.parse(rawGtm);
+      } catch {
+        // Ignore malformed JSON
+      }
+    }
+
+    const title = String(gtm?.item_name || $el.find(".prd-name").first().text() || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    const brand = String(gtm?.item_brand || "").trim();
+    const price = gtm?.price ? Number.parseFloat(gtm.price) : parseTrPrice($el.find(".prd-price").first().text());
+    if (!title || !Number.isFinite(price) || price <= 0) return;
+
+    const rel = matchesZeroKeyQuery(title, brand, gtm?.item_id || "", query);
+    if (!rel.ok) return;
+
+    const href = $el.find("a").first().attr("href") || "";
+    const productUrl = href.startsWith("http")
+      ? href
+      : href
+        ? `https://www.dr.com.tr${href.startsWith("/") ? "" : "/"}${href}`
+        : url;
+    if (seen.has(productUrl)) return;
+    seen.add(productUrl);
+
+    let image = $el.find("img").first().attr("data-src") || $el.find("img").first().attr("src") || "";
+    if (image.startsWith("//")) image = `https:${image}`;
+
+    out.push({
+      id: `dr-${gtm?.item_id || idx + 1}`,
+      storeName: "D&R",
+      title,
+      brand,
+      code: extractModelStyleCode("", title),
+      price: Math.round(price * 100) / 100,
+      listPrice: null,
+      image,
+      productUrl,
+      inStock: gtm?.item_stock !== "No",
+      freeShipThreshold: 1000,
+      deliveryLabel: "Hızlı Kargo (1-3 gün)",
+      deliveryDays: 2,
+      category: gtm?.item_category || "D&R",
+      relevanceScore: rel.score,
+    });
+  });
+
+  return out;
+}
+
+/**
+ * Merges identical zero-key store items across Turkish retailers by manufacturer model code
+ * (e.g. KI4392 on Intersport + SuperStep) or normalized title, building full FiyatRadar detail payloads.
+ */
+export function mergeZeroKeyStoreItems(rawItems, query) {
+  const groups = new Map();
+
+  for (const item of rawItems) {
+    const titleKey = normalizeZeroKeyText(item.title)
+      .split(" ")
+      .filter((w) => !ZERO_KEY_STOP_WORDS.has(w))
+      .slice(0, 7)
+      .join(" ");
+    const groupKey = item.code ? `code:${item.code}` : `title:${titleKey}`;
+    if (!groups.has(groupKey)) {
+      groups.set(groupKey, []);
+    }
+    groups.get(groupKey).push(item);
+  }
+
+  const products = [];
+  const encodedQ = encodeURIComponent(query.slice(0, 60));
+  let groupSeq = 0;
+
+  for (const [, items] of groups.entries()) {
+    // Keep cheapest offer per store within the merged product
+    const perStore = new Map();
+    for (const it of items) {
+      const sKey = it.storeName.toLowerCase();
+      const prev = perStore.get(sKey);
+      if (!prev || it.price < prev.price) {
+        perStore.set(sKey, it);
+      }
+    }
+
+    const storeItems = [...perStore.values()].sort((a, b) => a.price - b.price);
+    if (!storeItems.length) continue;
+
+    groupSeq++;
+    const best = storeItems[0];
+    const bestImage = storeItems.find((x) => x.image)?.image || "";
+    const bestBrand = storeItems.find((x) => x.brand)?.brand || "";
+    const bestCode = storeItems.find((x) => x.code)?.code || "";
+    const isAccessory = isAccessoryTitle(best.title, query);
+    const maxRelevance = Math.max(...storeItems.map((x) => x.relevanceScore || 0));
+
+    const offers = storeItems.map((it, idx) => {
+      const isFreeShip = it.price >= (it.freeShipThreshold || 1500);
+      const shippingCost = isFreeShip ? 0 : 59.9;
+      return {
+        id: `${it.id}-${idx + 1}`,
+        offerTitle: it.title,
+        basePrice: it.price,
+        shipping: {
+          cost: shippingCost,
+          isFree: isFreeShip,
+          label: isFreeShip ? "Ücretsiz kargo" : "Tahmini ~59,90 TL kargo",
+          unknown: false,
+        },
+        store: parseStoreInfo(it.storeName, ""),
+        storeLogo: null,
+        stockText: it.inStock ? "Stokta" : "Kontrol edin",
+        inStock: it.inStock,
+        delivery: { label: it.deliveryLabel || "Kargo ile teslimat", days: it.deliveryDays ?? 2, score: 0.84 },
+        lastUpdated: "Canlı",
+        promoNote: it.listPrice
+          ? `Liste fiyatı: ${it.listPrice.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL`
+          : "",
+        akakceBadge: "",
+        url: it.productUrl,
+        isDirectLink: true,
+      };
+    });
+
+    const vKey = `virtual:trnet:${encodedQ}:${groupSeq}`;
+    const minPrice = offers[0].basePrice;
+    const unitInfo = extractUnitInfo(best.title, minPrice);
+    const analysis = analyzeOffers(offers, unitInfo, { productTitle: best.title, category: best.category });
+    const listPrices = storeItems.map((x) => x.listPrice).filter((v) => typeof v === "number" && v > 0);
+    const refListPrice = listPrices.length ? Math.max(...listPrices) : null;
+    const histAnalysis = analyzePriceHistory([], analysis.stats?.minNet ?? minPrice, null, {
+      medianNet: analysis.stats?.medianNet ?? minPrice,
+      listPrice: refListPrice,
+    });
+
+    const storeListText = storeItems.map((x) => x.storeName).join(", ");
+    saveVirtualDetail(vKey, {
+      id: `trnet-${groupSeq}-${bestCode || best.id}`,
+      title: best.title,
+      brand: bestBrand,
+      category: best.category || "Türkiye Mağazaları",
+      description: `${best.title} — ${storeListText} canlı yetkili mağaza fiyatları.`,
+      url: vKey,
+      image: bestImage,
+      rating: null,
+      totalOfferCount: offers.length,
+      unitInfo: unitInfo ? extractUnitInfo(best.title, analysis.stats?.minNet ?? minPrice) : null,
+      fetchedAt: new Date().toISOString(),
+      cached: false,
+      provider: storeItems.length > 1 ? `${storeItems.length} Canlı Mağaza (${storeListText})` : best.storeName,
+      lowPrice: analysis.stats?.minNet ?? minPrice,
+      highPrice: analysis.stats?.maxNet ?? minPrice,
+      stats: analysis.stats,
+      picks: analysis.picks,
+      shippingTraps: analysis.shippingTraps,
+      platformBreakdown: analysis.platformBreakdown,
+      trustSummary: analysis.trustSummary,
+      offers: analysis.offers,
+      history: [],
+      historySummary: null,
+      fakeDiscount: histAnalysis.fakeDiscount,
+      verdict: histAnalysis.verdict,
+      variants: [],
+      specs: [
+        ...(bestCode ? [{ name: "Ürün / Model Kodu", value: bestCode }] : []),
+        ...(bestBrand ? [{ name: "Marka", value: bestBrand }] : []),
+        ...(refListPrice && refListPrice > minPrice
+          ? [{ name: "İndirimsiz Liste Fiyatı", value: `${refListPrice.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL` }]
+          : []),
+      ],
+    });
+
+    products.push({
+      id: `trnet-${groupSeq}-${bestCode || best.id}`,
+      title: best.title,
+      url: vKey,
+      externalUrl: best.productUrl,
+      isListingPage: false,
+      image: bestImage,
+      lowestPrice: minPrice,
+      offerCount: offers.length,
+      badge: offers.length > 1 ? `${offers.length} Mağazada Kıyasla` : best.storeName,
+      source: offers.length > 1 ? storeListText : best.storeName,
+      isOfficialStore: true,
+      isFreeShipping: offers.some((o) => o.shipping?.isFree),
+      isAccessory,
+      unitInfo,
+      _relScore: maxRelevance,
+    });
+  }
+
+  // Sort: non-accessories first, then multi-store comparisons, then relevance, then price
+  products.sort((a, b) => {
+    if (Boolean(a.isAccessory) !== Boolean(b.isAccessory)) return a.isAccessory ? 1 : -1;
+    if ((b.offerCount > 1) !== (a.offerCount > 1)) return b.offerCount > 1 ? 1 : -1;
+    if ((b._relScore || 0) !== (a._relScore || 0)) return (b._relScore || 0) - (a._relScore || 0);
+    return (a.lowestPrice ?? Infinity) - (b.lowestPrice ?? Infinity);
+  });
+
+  return products.map(({ _relScore, ...rest }) => rest);
+}
+
+/**
+ * Provider 3 (Zero-Key Cloud-Proof Official Turkish Store Network):
+ * Works out-of-the-box on any cloud IP (Render, Railway, Fly, etc.) with ZERO API key!
+ * Queries in parallel:
+ * - Akinon Official JSON Storefronts (SuperStep, FashFed, Intersport, Sportive, Sporjinal, Koton, Tefal TR)
+ * - Beymen (luxury fashion, shoes, perfumes, cosmetics, sunglasses)
+ * - D&R (Apple, electronics, headphones, gaming, books)
+ * - Migros Elektronik & Migros Sanal Market REST API
+ * - T.C. Ticaret Bakanlığı / TÜBİTAK Market Fiyatı Official API (A101, BİM, CarrefourSA, Migros, ŞOK...)
  */
 export async function searchOfficialFallback(query) {
-  const [marketItems, migrosElec, migrosMarket] = await Promise.all([
+  const [akinonBatches, beymenItems, drItems, marketItems, migrosElec, migrosMarket] = await Promise.all([
+    Promise.all(AKINON_TR_STORES.map((store) => fetchAkinonStore(store, query).catch(() => []))),
+    fetchBeymen(query).catch(() => []),
+    fetchDrStore(query).catch(() => []),
     fetchMarketFiyati(query).catch(() => []),
     fetchMigros(query, "elektronik").catch(() => []),
     fetchMigros(query, "market").catch(() => []),
   ]);
 
+  const flatRetailItems = [...akinonBatches.flat(), ...beymenItems, ...drItems];
+  const mergedRetail = mergeZeroKeyStoreItems(flatRetailItems, query);
+
   const combined = [];
   const seenTitles = new Set();
 
-  for (const item of [...marketItems, ...migrosElec, ...migrosMarket]) {
+  for (const item of [...mergedRetail, ...marketItems, ...migrosElec, ...migrosMarket]) {
     const key = item.title.toLocaleLowerCase("tr-TR").replace(/\s+/g, " ").trim();
     if (seenTitles.has(key)) continue;
     seenTitles.add(key);
     combined.push(item);
   }
 
+  // Sort combined list so non-accessories & multi-store offers lead cleanly
+  combined.sort((a, b) => {
+    if (Boolean(a.isAccessory) !== Boolean(b.isAccessory)) return a.isAccessory ? 1 : -1;
+    if ((b.offerCount > 1) !== (a.offerCount > 1)) return b.offerCount > 1 ? 1 : -1;
+    return 0;
+  });
+
+  const activeStores = new Set();
+  for (const it of combined) {
+    if (it.source) {
+      for (const s of String(it.source).split(",")) {
+        const t = s.trim();
+        if (t) activeStores.add(t);
+      }
+    }
+  }
+  const storePreview = [...activeStores].slice(0, 4).join(", ");
+  const extraCount = Math.max(0, activeStores.size - 4);
+  const providerLabel = storePreview
+    ? extraCount > 0
+      ? `${storePreview} +${extraCount} mağaza`
+      : storePreview
+    : "Canlı Türkiye Mağaza Ağı";
+
   return {
     query,
-    provider: "Migros Elektronik + T.C. Market Fiyatı",
+    provider: providerLabel,
     fallbackMode: true,
     directProduct: false,
     fetchedAt: new Date().toISOString(),
     cached: false,
     totalFound: combined.length,
-    products: combined,
+    products: combined.slice(0, 60),
   };
 }
 

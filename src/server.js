@@ -143,13 +143,18 @@ app.get("/api/health", (_req, res) => {
 
 // Active provider configuration status (never leaks key values)
 app.get("/api/providers", (req, res) => {
-  const hasServerSerper = Boolean((process.env.SERPER_API_KEY || "").trim());
+  const serverKeys = [
+    ...String(process.env.SERPER_API_KEYS || "").split(/[\s,;]+/),
+    String(process.env.SERPER_API_KEY || ""),
+  ].filter(Boolean);
+  const hasServerSerper = serverKeys.length > 0;
   const hasServerSerpApi = Boolean((process.env.SERPAPI_KEY || "").trim());
   const hasClientSerper = Boolean(String(req.headers["x-serper-key"] || "").trim());
   const hasClientSerpApi = Boolean(String(req.headers["x-serpapi-key"] || "").trim());
   res.json({
     googleShoppingReady: hasServerSerper || hasServerSerpApi || hasClientSerper || hasClientSerpApi,
     serverSerper: hasServerSerper,
+    serverSerperKeyCount: serverKeys.length,
     serverSerpApi: hasServerSerpApi,
     clientSerper: hasClientSerper,
     clientSerpApi: hasClientSerpApi,
@@ -159,7 +164,11 @@ app.get("/api/providers", (req, res) => {
 // Live Serper API key verification endpoint
 app.post("/api/providers/test", async (req, res) => {
   try {
-    const key = String(req.body?.serperKey || req.headers["x-serper-key"] || process.env.SERPER_API_KEY || "").trim();
+    const firstServerKey = [
+      ...String(process.env.SERPER_API_KEYS || "").split(/[\s,;]+/),
+      String(process.env.SERPER_API_KEY || ""),
+    ].find(Boolean);
+    const key = String(req.body?.serperKey || req.headers["x-serper-key"] || firstServerKey || "").trim();
     if (!key) {
       return res.status(400).json({ ok: false, error: "Test etmek için bir Serper API anahtarı girin." });
     }

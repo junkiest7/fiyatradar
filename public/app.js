@@ -1316,15 +1316,13 @@ function renderSearchResults() {
   }
 
   if (els.fallbackNoticeBanner) {
-    if (data.fallbackNotice) {
+    if (data.fallbackNotice && !data.products?.length) {
       els.fallbackNoticeBanner.hidden = false;
       els.fallbackNoticeBanner.innerHTML = `
         <div class="fallback-notice-text">
-          <strong>Yedek Canlı Kaynak Aktif:</strong> ${esc(data.fallbackNotice)}
+          <strong>Bilgi:</strong> ${esc(data.fallbackNotice)}
         </div>
-        <button type="button" class="btn btn-primary btn-sm" id="fallbackOpenSettingsBtn">70+ Mağazayı Aç (Ücretsiz API)</button>
       `;
-      $("fallbackOpenSettingsBtn")?.addEventListener("click", openSettingsModal);
     } else {
       els.fallbackNoticeBanner.hidden = true;
       els.fallbackNoticeBanner.innerHTML = "";
@@ -1367,13 +1365,9 @@ function renderSearchResults() {
         <p>${
           data.products.length > 0
             ? "Seçili mağaza, kategori veya aksesuar filtresi sonuçları gizledi. Yukarıdaki 'Tümü' çipine dokunarak tüm sonuçları görebilirsiniz."
-            : data.fallbackMode
-              ? "Bu ürün Migros Elektronik / T.C. Market Fiyatı kataloğunda bulunamadı. Trendyol, Hepsiburada, Amazon TR, n11, Stradivarius ve MediaMarkt dahil tüm Türkiye mağazalarını taramak için Ayarlar'dan ücretsiz Serper API anahtarı ekleyebilirsiniz."
-              : "Fiyat filtresini gevşetmeyi veya daha genel bir model adı denemeyi düşünün."
+            : "Bu arama için canlı mağazalarda eşleşen ürün bulunamadı. Marka + kısa model adı (örn. 'adidas samba', 'dior sauvage', 'airpods 4') yazarak tekrar deneyebilirsiniz."
         }</p>
-        ${data.fallbackMode && !data.products.length ? `<button type="button" class="btn btn-primary btn-sm" id="emptyOpenSettingsBtn" style="margin-top:10px;">Ücretsiz 70+ Mağaza API Ayarla</button>` : ""}
       </div>`;
-    $("emptyOpenSettingsBtn")?.addEventListener("click", openSettingsModal);
     return;
   }
 
