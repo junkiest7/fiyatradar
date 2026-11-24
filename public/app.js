@@ -139,9 +139,6 @@ const state = {
 const $ = (id) => document.getElementById(id);
 
 const els = {
-  themeToggleBtn: $("themeToggleBtn"),
-  themeIconMoon: $("themeIconMoon"),
-  themeIconSun: $("themeIconSun"),
   themeColorMeta: $("themeColorMeta"),
   searchHero: $("searchHero"),
   searchForm: $("searchForm"),
@@ -3509,8 +3506,7 @@ function bindEvents() {
     }
   });
 
-  // OLED Dark Mode toggle
-  els.themeToggleBtn?.addEventListener("click", toggleTheme);
+  // Theme is managed inside Settings Modal (Sistem / Aydınlık / Karanlık)
 
   // Turkish Voice Search (Web Speech API)
   els.voiceSearchBtn?.addEventListener("click", handleVoiceToggle);
@@ -4101,8 +4097,6 @@ function applyTheme(mode) {
   if (els.themeColorMeta) {
     els.themeColorMeta.setAttribute("content", isDark ? "#0b0d12" : "#f7f6f2");
   }
-  if (els.themeIconMoon) els.themeIconMoon.hidden = isDark;
-  if (els.themeIconSun) els.themeIconSun.hidden = !isDark;
   // Re-render SVG chart so gridlines & axis labels adapt immediately
   if (state.activeView === "detail" && state.currentDetail && $("priceChartMount")) {
     renderPriceChart($("priceChartMount"), state.currentDetail.history, state.chartRange);
@@ -4119,14 +4113,6 @@ function setThemePreference(prefMode) {
     // Ignore
   }
   applyTheme(resolveEffectiveTheme(clean));
-}
-
-function toggleTheme() {
-  const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
-  const next = current === "dark" ? "light" : "dark";
-  setThemePreference(next);
-  syncSettingsModalUI();
-  showToast(next === "dark" ? "Karanlık Mod (OLED) açıldı." : "Aydınlık Mod açıldı.");
 }
 
 function initTheme() {
