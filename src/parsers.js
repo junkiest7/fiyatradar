@@ -688,5 +688,202 @@ export function suggestWatchlistFolder(title) {
   return "Diğer";
 }
 
+const REFURB_REGEX =
+  /\b(yenilenmis|refurbished|outlet\s+urun|easycep|getmobil|hb\s+bilisim|ikinci\s+el|2\.\s*el|grade\s*[ab]|a\s+kalite\s+yenilenmis|b\s+kalite\s+yenilenmis)\b/i;
+
+const DEMO_REGEX =
+  /\b(teshir|vitrin\s+urunu|acik\s+kutu|kutu\s+acik|demo\s+urun|sergi\s+urunu|hasarli\s+kutu)\b/i;
+
+const IMPORTER_WARRANTY_REGEX =
+  /\b(ithalatci\s+garantili|ithalatci|paralel\s+ithalat|yurt\s*disi|kayitsiz|global\s+rom|avrupa\s+cihazi|amerika\s+cihazi|cift\s+sim\s+yurt\s*disi)\b/i;
+
+const DISTRIBUTOR_WARRANTY_REGEX =
+  /\b(apple\s+turkiye|samsung\s+turkiye|xiaomi\s+turkiye|huawei\s+turkiye|sony\s+eurasia|resmi\s+distributor|turkiye\s+garantili|tr\s+garantili|tr\s+cihazi|genpa|kvk|yetkili\s+servis\s+garantili|bosch\s+turkiye|philips\s+turkiye|dyson\s+turkiye|lg\s+turkiye|asus\s+turkiye|lenovo\s+turkiye|hp\s+turkiye|resmi\s+garantili|dist\.\s*garantili)\b/i;
+
+const HIGH_RISK_AUTH_CATEGORY_REGEX =
+  /\b(parfum|edp|edt|eau\s+de|cologne|krem|serum|ruj|fondoten|maskara|gunes\s+kremi|cilt\s+bakim|dior|chanel|ysl|lancome|estee\s+lauder|kerastase|la\s+roche|cerave|tom\s+ford|jo\s+malone|creed|gucci|prada|ray-?ban|versace|burberry|louis\s+vuitton|michael\s+kors|persol|oakley|balenciaga|saint\s+laurent|rolex|tissot|seiko|casio|swatch|nike|adidas|new\s+balance|jordan|asics|salomon|ugg|birkenstock|converse|airpods|dyson)\b/i;
+
+const ELECTRONICS_CATEGORY_REGEX =
+  /\b(iphone|samsung|galaxy|xiaomi|redmi|macbook|laptop|notebook|tablet|ipad|airpods|kulaklik|akilli\s+saat|watch|televizyon|tv|monitor|playstation|ps5|xbox|nintendo|dyson|airfryer|fritoz|supurge|kamera|kahve\s+makinesi|buzdolabi|camasir|bulasik|klima|philips|bosch|siemens|arcelik|beko|apple|huawei|lenovo|asus|hp|dell|msi)\b/i;
+
+const AUTHORIZED_RETAILER_KEYS = [
+  "amazon",
+  "hepsiburada",
+  "trendyol",
+  "mediamarkt",
+  "teknosa",
+  "vatan",
+  "migros",
+  "boyner",
+  "beymen",
+  "sephora",
+  "atasun",
+  "sunglass hut",
+  "saat&saat",
+  "saat ve saat",
+  "vakko",
+  "brandroom",
+  "superstep",
+  "sneaks up",
+  "barcin",
+  "korayspor",
+  "decathlon",
+  "watsons",
+  "gratis",
+  "rossmann",
+  "dermoeczanem",
+  "turuncukasa",
+  "stradivarius",
+  "zara",
+  "mango",
+  "bershka",
+  "pull&bear",
+  "massimo dutti",
+  "nike",
+  "adidas",
+  "dyson",
+  "apple",
+  "samsung",
+  "turkcell",
+  "ikea",
+  "koctas",
+  "d&r",
+  "itopya",
+  "incehesap",
+  "sinerji",
+  "gaming.gen",
+];
+
+const DIRECT_TECH_RETAILERS = [
+  "mediamarkt",
+  "teknosa",
+  "vatan",
+  "turkcell",
+  "dyson",
+  "apple",
+  "samsung",
+  "migros",
+  "amazon",
+  "hepsiburada",
+  "itopya",
+];
+
+/**
+ * Classifies an offer for Turkish Authenticity, Official TR Warranty vs Importer Warranty,
+ * Refurbished/Demo condition, and Seller Trust Tier ("Güven Kalkanı").
+ * @param {object} offer
+ * @param {string} productTitle
+ * @param {string} category
+ */
+export function analyzeOfferAuthenticity(offer, productTitle = "", category = "") {
+  const offerText = transliterateTr(
+    `${offer?.offerTitle || ""} ${offer?.promoNote || ""} ${offer?.akakceBadge || ""} ${offer?.stockText || ""} ${offer?.store?.displayName || ""}`
+  ).toLowerCase();
+  const contextText = transliterateTr(`${productTitle || ""} ${category || ""} ${offer?.offerTitle || ""}`).toLowerCase();
+
+  const platformNorm = transliterateTr(offer?.store?.platform || "").toLowerCase();
+  const sellerNorm = transliterateTr(offer?.store?.seller || "").toLowerCase();
+  const urlLower = String(offer?.url || "").toLowerCase();
+
+  const isHighRiskCategory = HIGH_RISK_AUTH_CATEGORY_REGEX.test(contextText);
+  const isElectronics = ELECTRONICS_CATEGORY_REGEX.test(contextText);
+
+  // 1. Condition detection (Refurbished / Demo vs Brand New)
+  let condition = "new";
+  let conditionLabel = "Sıfır Ürün";
+  if (REFURB_REGEX.test(offerText) || /\b(easycep|getmobil)\b/i.test(platformNorm)) {
+    condition = "refurbished";
+    conditionLabel = "Yenilenmiş / Outlet";
+  } else if (DEMO_REGEX.test(offerText)) {
+    condition = "demo";
+    conditionLabel = "Teşhir / Açık Kutu";
+  }
+
+  // 2. Warranty detection (Importer vs TR Official Distributor)
+  let warranty = "unknown";
+  let warrantyLabel = "";
+  if (IMPORTER_WARRANTY_REGEX.test(offerText)) {
+    warranty = "importer";
+    warrantyLabel = "İthalatçı Garantili";
+  } else if (DISTRIBUTOR_WARRANTY_REGEX.test(offerText)) {
+    warranty = "distributor";
+    warrantyLabel = "TR Resmi Garanti";
+  } else if (
+    isElectronics &&
+    condition === "new" &&
+    !sellerNorm &&
+    DIRECT_TECH_RETAILERS.some((k) => platformNorm.includes(k))
+  ) {
+    warranty = "distributor";
+    warrantyLabel = "TR Resmi Garanti";
+  }
+
+  // 3. Authorized / Official Seller check
+  let isBrandOwnSite = false;
+  try {
+    if (urlLower.startsWith("http")) {
+      const host = new URL(urlLower).hostname.replace(/^www\.|^m\./, "");
+      const titleTokens = contextText.split(/[^a-z0-9]+/).filter((t) => t.length >= 4);
+      isBrandOwnSite = titleTokens.some((tok) => host.startsWith(`${tok}.`) || host.includes(`.${tok}.`));
+    }
+  } catch {
+    // Ignore invalid URL
+  }
+
+  const isDirectAuthorizedPlatform =
+    !sellerNorm && AUTHORIZED_RETAILER_KEYS.some((k) => platformNorm.includes(k));
+  const isAuthorizedSeller =
+    Boolean(offer?.store?.isOfficialSeller) ||
+    isDirectAuthorizedPlatform ||
+    isBrandOwnSite ||
+    AUTHORIZED_RETAILER_KEYS.some((k) => sellerNorm && sellerNorm.includes(k));
+
+  const isAuthorized = Boolean(isAuthorizedSeller && condition === "new" && warranty !== "importer");
+
+  // 4. Risk reasons & overall Trust Tier
+  const riskReasons = [];
+  if (condition === "refurbished") riskReasons.push("Yenilenmiş / 2. el veya outlet ürün ilanı");
+  if (condition === "demo") riskReasons.push("Teşhir veya açılmış kutu uyarısı içeriyor");
+  if (warranty === "importer") riskReasons.push("İthalatçı garantili (resmi TR distribütör servisi dışındadır)");
+  if (offer?.isSuspiciousLow) riskReasons.push("Fiyat piyasa medyanının çok altında (sahte / muadil / aksesuar riski)");
+  if (typeof offer?.store?.sellerRating === "number" && offer.store.sellerRating > 0 && offer.store.sellerRating < 8.0) {
+    riskReasons.push(`Düşük satıcı puanı (${offer.store.sellerRating}/10)`);
+  }
+  if (isHighRiskCategory && !isAuthorized && condition === "new") {
+    riskReasons.push("Parfüm/lüks/ayakkabı kategorisinde yetkili olmayan 3. parti satıcı — orijinallik kontrolü önerilir");
+  }
+
+  let trustTier = "standard";
+  if (riskReasons.length > 0) {
+    trustTier = "caution";
+  } else if (isAuthorized) {
+    trustTier = "verified";
+  }
+
+  const shieldScore =
+    trustTier === "verified"
+      ? 95
+      : condition === "demo" || offer?.isSuspiciousLow
+        ? 30
+        : condition === "refurbished" || warranty === "importer"
+          ? 52
+          : trustTier === "caution"
+            ? 62
+            : 80;
+
+  return {
+    condition,
+    conditionLabel,
+    warranty,
+    warrantyLabel,
+    isAuthorized,
+    isHighRiskCategory,
+    isElectronics,
+    trustTier,
+    shieldScore,
+    riskReasons,
+  };
+}
+
 
 

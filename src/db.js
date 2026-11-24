@@ -56,6 +56,15 @@ try {
     );
 
     CREATE INDEX IF NOT EXISTS idx_snapshots_product ON price_snapshots(product_id, captured_at);
+
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      endpoint TEXT PRIMARY KEY,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      user_agent TEXT DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
 
   // Idempotent schema migrations for pre-existing databases
@@ -77,8 +86,9 @@ try {
   // Fallback to atomic JSON persistence
   try {
     jsonState = JSON.parse(fs.readFileSync(JSON_PATH, "utf-8"));
+    if (!Array.isArray(jsonState.push_subscriptions)) jsonState.push_subscriptions = [];
   } catch {
-    jsonState = { search_history: [], watchlist: [], price_snapshots: [] };
+    jsonState = { search_history: [], watchlist: [], price_snapshots: [], push_subscriptions: [] };
   }
 }
 
@@ -507,4 +517,83 @@ export function removeWatchlistItem(id) {
   jsonState.watchlist = jsonState.watchlist.filter((w) => w.id !== String(id));
   saveJson();
   return jsonState.watchlist.length < before;
+}
+
+// ============================================================================
+// WEB PUSH SUBSCRIPTIONS (iOS Safari 16.4+ PWA & Desktop Push)
+// ============================================================================
+export function savePushSubscription(sub, userAgent = "") {
+  const endpoint = String(sub?.endpoint || "").trim();
+  const p256dh = String(sub?.keys?.p256dh || "").trim();
+  const auth = String(sub?.keys?.auth || "").trim();
+  if (!endpoint || !p256dh || !auth) {
+    throw new Error("Geçersiz bildirim aboneliği (endpoint veya anahtarlar eksik).");
+  }
+  const now = new Date().toISOString();
+  const ua = String(userAgent || "").slice(0, 180);
+
+  if (db) {
+    db.prepare(
+      `INSERT INTO push_subscriptions (endpoint, p256dh, auth, user_agent, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(endpoint) DO UPDATE SET
+         p256dh = excluded.p256dh,
+         auth = excluded.auth,
+         user_agent = excluded.user_agent,
+         updated_at = excluded.updated_at`
+    ).run(endpoint, p256dh, auth, ua, now, now);
+    return { endpoint, keys: { p256dh, auth }, updated_at: now };
+  }
+
+  if (!Array.isArray(jsonState.push_subscriptions)) jsonState.push_subscriptions = [];
+  const idx = jsonState.push_subscriptions.findIndex((s) => s.endpoint === endpoint);
+  const entry = {
+    endpoint,
+    p256dh,
+    auth,
+    user_agent: ua,
+    created_at: idx >= 0 ? jsonState.push_subscriptions[idx].created_at : now,
+    updated_at: now,
+  };
+  if (idx >= 0) jsonState.push_subscriptions[idx] = entry;
+  else jsonState.push_subscriptions.push(entry);
+  saveJson();
+  return { endpoint, keys: { p256dh, auth }, updated_at: now };
+}
+
+export function getPushSubscriptions() {
+  if (db) {
+    const rows = db
+      .prepare("SELECT endpoint, p256dh, auth, user_agent, created_at, updated_at FROM push_subscriptions")
+      .all();
+    return rows.map((r) => ({
+      endpoint: r.endpoint,
+      keys: { p256dh: r.p256dh, auth: r.auth },
+      user_agent: r.user_agent,
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+    }));
+  }
+  const list = Array.isArray(jsonState.push_subscriptions) ? jsonState.push_subscriptions : [];
+  return list.map((r) => ({
+    endpoint: r.endpoint,
+    keys: { p256dh: r.p256dh, auth: r.auth },
+    user_agent: r.user_agent,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+  }));
+}
+
+export function removePushSubscription(endpoint) {
+  const clean = String(endpoint || "").trim();
+  if (!clean) return false;
+  if (db) {
+    const res = db.prepare("DELETE FROM push_subscriptions WHERE endpoint = ?").run(clean);
+    return res.changes > 0;
+  }
+  if (!Array.isArray(jsonState.push_subscriptions)) return false;
+  const before = jsonState.push_subscriptions.length;
+  jsonState.push_subscriptions = jsonState.push_subscriptions.filter((s) => s.endpoint !== clean);
+  saveJson();
+  return jsonState.push_subscriptions.length < before;
 }

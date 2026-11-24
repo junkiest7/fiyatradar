@@ -3,7 +3,7 @@
  * and 180-day timing/fake-discount advisor.
  */
 
-import { formatTrNumber } from "./parsers.js";
+import { analyzeOfferAuthenticity, formatTrNumber } from "./parsers.js";
 
 function quantile(sorted, q) {
   if (!sorted.length) return 0;
@@ -26,11 +26,15 @@ function round2(n) {
  * - unitPrice (if product has measurable quantity)
  * - shipping traps (sticker price cheaper, but net price more expensive)
  * - outlier flagging (overpriced listings)
+ * - authenticity / TR Official vs Importer Warranty / Refurbished & Demo Trust Shield
  * - 0-100 Deal Score per offer
  * - Top picks (Cheapest Net, Best Value, Fastest Competitive)
  * - Marketplace breakdown (min/avg/count per platform)
  */
-export function analyzeOffers(rawOffers, unitInfo = null) {
+export function analyzeOffers(rawOffers, unitInfo = null, context = {}) {
+  const productTitle = context?.productTitle || "";
+  const productCategory = context?.category || "";
+
   const valid = rawOffers
     .filter((o) => typeof o.basePrice === "number" && Number.isFinite(o.basePrice) && o.basePrice > 0)
     .map((o) => {
@@ -53,6 +57,7 @@ export function analyzeOffers(rawOffers, unitInfo = null) {
       picks: null,
       shippingTraps: [],
       platformBreakdown: [],
+      trustSummary: null,
     };
   }
 
@@ -119,7 +124,7 @@ export function analyzeOffers(rawOffers, unitInfo = null) {
     }
   }
 
-  // Score each offer (0 - 100)
+  // Score each offer (0 - 100) + evaluate Authenticity / Warranty Trust Shield
   const scoredOffers = valid.map((o, idx) => {
     const isSuspiciousLow = suspiciousLowThreshold > 0 && o.netPrice < suspiciousLowThreshold;
     const refMin = verifiedMinNet;
@@ -130,6 +135,12 @@ export function analyzeOffers(rawOffers, unitInfo = null) {
       valid.length >= 3 &&
       (o.netPrice > tukeyFence || o.netPrice > relativeFence);
     const isShippingTrap = trapIds.has(o.id);
+
+    const trustShield = analyzeOfferAuthenticity(
+      { ...o, isSuspiciousLow },
+      productTitle,
+      productCategory
+    );
 
     // 1. Price score (0-55 pts): exponential decay as % above verified cheapest rises
     const priceScore = isSuspiciousLow
@@ -146,7 +157,19 @@ export function analyzeOffers(rawOffers, unitInfo = null) {
     // 4. Delivery & stock signal (0-13 pts)
     const deliveryPoints = (o.delivery?.score || 0.55) * 9 + (o.inStock ? 4 : 0);
 
-    const dealScore = Math.max(1, Math.min(100, Math.round(priceScore + trustPoints + shippingPoints + deliveryPoints)));
+    // 5. Authenticity & Warranty risk adjustment (prevents importer/refurbished/demo from winning Best Value)
+    let shieldPenalty = 0;
+    if (trustShield.condition === "demo") shieldPenalty += 18;
+    else if (trustShield.condition === "refurbished") shieldPenalty += 14;
+    if (trustShield.warranty === "importer") shieldPenalty += 10;
+    if (trustShield.isHighRiskCategory && !trustShield.isAuthorized && trustShield.condition === "new") {
+      shieldPenalty += 8;
+    }
+
+    const dealScore = Math.max(
+      1,
+      Math.min(100, Math.round(priceScore + trustPoints + shippingPoints + deliveryPoints - shieldPenalty))
+    );
 
     return {
       ...o,
@@ -157,18 +180,22 @@ export function analyzeOffers(rawOffers, unitInfo = null) {
       isOutlier,
       isSuspiciousLow,
       isShippingTrap,
+      trustShield,
       dealScore,
       badges: [],
     };
   });
 
-  // Top picks (prefer authentic non-suspicious offers!)
+  // Top picks (prefer authentic non-suspicious brand-new offers!)
   const authenticPool = scoredOffers.filter((o) => !o.isSuspiciousLow);
   const pickBase = authenticPool.length ? authenticPool : scoredOffers;
-  const cheapestNet = pickBase[0];
-  const bestValue = [...pickBase].sort((a, b) => b.dealScore - a.dealScore || a.netPrice - b.netPrice)[0];
-  const competitivePool = pickBase.filter((o) => o.diffFromMinPct <= 6);
-  const fastestCompetitive = [...(competitivePool.length ? competitivePool : pickBase)].sort(
+  const brandNewPool = pickBase.filter((o) => o.trustShield?.condition === "new");
+  const primaryPool = brandNewPool.length ? brandNewPool : pickBase;
+
+  const cheapestNet = primaryPool[0];
+  const bestValue = [...primaryPool].sort((a, b) => b.dealScore - a.dealScore || a.netPrice - b.netPrice)[0];
+  const competitivePool = primaryPool.filter((o) => o.diffFromMinPct <= 6);
+  const fastestCompetitive = [...(competitivePool.length ? competitivePool : primaryPool)].sort(
     (a, b) => (a.delivery?.days ?? 5) - (b.delivery?.days ?? 5) || a.netPrice - b.netPrice
   )[0];
 
@@ -178,10 +205,59 @@ export function analyzeOffers(rawOffers, unitInfo = null) {
     fastestCompetitive.badges.push({ type: "fast", label: fastestCompetitive.delivery.label });
   }
   for (const o of scoredOffers) {
+    const ts = o.trustShield;
+    if (ts?.condition === "refurbished") o.badges.push({ type: "warn", label: "♻ Yenilenmiş / Outlet" });
+    if (ts?.condition === "demo") o.badges.push({ type: "trap", label: "⚠ Teşhir / Açık Kutu" });
+    if (ts?.warranty === "importer") o.badges.push({ type: "warn", label: "⚠ İthalatçı Garantili" });
+    else if (ts?.warranty === "distributor") o.badges.push({ type: "official", label: "✓ TR Resmi Garanti" });
+    if (ts?.isHighRiskCategory && !ts.isAuthorized && ts.condition === "new" && !o.isSuspiciousLow) {
+      o.badges.push({ type: "warn", label: "⚠ 3. Parti Satıcı" });
+    }
     if (o.isShippingTrap) o.badges.push({ type: "trap", label: "Kargo Tuzağı" });
     if (o.isOutlier) o.badges.push({ type: "outlier", label: "Piyasa Üstü Fiyat" });
     if (o.isSuspiciousLow) o.badges.push({ type: "trap", label: "⚠ Şüpheli Ucuz / Muadil" });
   }
+
+  // Trust & Authenticity summary across all analyzed offers
+  const authorizedOffers = pickBase.filter((o) => o.trustShield?.isAuthorized);
+  const importerCount = scoredOffers.filter((o) => o.trustShield?.warranty === "importer").length;
+  const distributorCount = scoredOffers.filter((o) => o.trustShield?.warranty === "distributor").length;
+  const refurbishedCount = scoredOffers.filter((o) => o.trustShield?.condition === "refurbished").length;
+  const demoCount = scoredOffers.filter((o) => o.trustShield?.condition === "demo").length;
+  const cautionCount = scoredOffers.filter((o) => o.trustShield?.trustTier === "caution").length;
+  const isHighRiskCategory = scoredOffers.some((o) => o.trustShield?.isHighRiskCategory);
+  const cheapestAuthorized = authorizedOffers.length ? pickSummary(authorizedOffers[0]) : null;
+
+  let recommendationNote = "";
+  if (isHighRiskCategory && cheapestAuthorized && cheapestNet && !cheapestNet.trustShield?.isAuthorized) {
+    const diff = round2(cheapestAuthorized.netPrice - cheapestNet.netPrice);
+    recommendationNote =
+      diff > 0
+        ? `Bu kategori (parfüm/kozmetik/lüks/ayakkabı) sahte ürün riski taşır. En ucuz yetkili/resmi satıcı (${cheapestAuthorized.store}) sadece +${formatTrNumber(diff)} TL farkla orijinallik güvencesi sunuyor.`
+        : `En ucuz yetkili/resmi satıcı: ${cheapestAuthorized.store} (${formatTrNumber(cheapestAuthorized.netPrice)} TL).`;
+  } else if (importerCount > 0 || refurbishedCount > 0 || demoCount > 0) {
+    const parts = [];
+    if (importerCount > 0) parts.push(`${importerCount} ithalatçı garantili`);
+    if (refurbishedCount > 0) parts.push(`${refurbishedCount} yenilenmiş/outlet`);
+    if (demoCount > 0) parts.push(`${demoCount} teşhir/açık kutu`);
+    recommendationNote = `Teklifler arasında ${parts.join(", ")} ilan tespit edildi. Aşağıdaki filtreyle tek dokunuşta ayıklayabilirsiniz.`;
+  } else if (isHighRiskCategory && authorizedOffers.length > 0) {
+    recommendationNote = `${authorizedOffers.length} yetkili / resmi mağaza teklifi doğrulandı. Orijinallik için 'Sadece Yetkili Satıcılar' filtresini kullanabilirsiniz.`;
+  } else if (isHighRiskCategory && authorizedOffers.length === 0 && cautionCount > 0) {
+    recommendationNote = `Bu kategori (parfüm/kozmetik/lüks/ayakkabı) sahte ürün riski taşır ve listelenen ${cautionCount} teklifin tamamı 3. parti satıcıdır. Satın almadan önce yetkili satıcılar veya marka resmi sitesiyle karşılaştırmanız önerilir.`;
+  }
+
+  const trustSummary = {
+    isHighRiskCategory,
+    authorizedCount: authorizedOffers.length,
+    distributorCount,
+    importerCount,
+    refurbishedCount,
+    demoCount,
+    cautionCount,
+    cheapestAuthorized,
+    recommendationNote,
+  };
 
   // Platform breakdown
   const platMap = new Map();
@@ -245,6 +321,10 @@ export function analyzeOffers(rawOffers, unitInfo = null) {
       inStockCount: scoredOffers.filter((o) => o.inStock).length,
       outlierCount: scoredOffers.length - nonOutliers.length,
       suspiciousLowCount,
+      authorizedCount: authorizedOffers.length,
+      importerCount,
+      refurbishedCount,
+      demoCount,
       bestUnitPrice: cheapestNet?.unitPrice ?? null,
     },
     picks: {
@@ -254,6 +334,7 @@ export function analyzeOffers(rawOffers, unitInfo = null) {
     },
     shippingTraps,
     platformBreakdown,
+    trustSummary,
   };
 }
 
@@ -273,6 +354,9 @@ function pickSummary(o) {
     stockText: o.stockText || "",
     url: o.url,
     storeLogo: o.storeLogo || null,
+    trustTier: o.trustShield?.trustTier || "standard",
+    warrantyLabel: o.trustShield?.warrantyLabel || "",
+    conditionLabel: o.trustShield?.condition !== "new" ? o.trustShield?.conditionLabel || "" : "",
   };
 }
 

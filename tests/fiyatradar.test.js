@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  analyzeOfferAuthenticity,
   areColorsCompatible,
   extractUnitInfo,
   extractVariantAttributes,
@@ -30,15 +31,23 @@ import {
   searchSecondHandTurkey,
 } from "../src/providers.js";
 import {
+  getPushSubscriptions,
   getWatchlist,
+  removePushSubscription,
   removeWatchlistItem,
+  savePushSubscription,
   summarizeWatchlistBudget,
   updateWatchlistItem,
   upsertWatchlistItem,
 } from "../src/db.js";
+import {
+  detectWatchlistPushAlerts,
+  getPushConfig,
+  isValidPushEndpoint,
+} from "../src/push.js";
 import { extractQueryFromStoreUrl, isExternalStoreUrl } from "../src/urlResolver.js";
 import { optimizeCart } from "../src/optimizer.js";
-import { isPrivateOrReservedIp } from "../src/server.js";
+import { extractSharedQuery, isPrivateOrReservedIp } from "../src/server.js";
 import { cleanOcrProductLines } from "../public/mediaSearch.js";
 
 test("parseTrPrice handles both Turkish and Google/US formatted currency strings accurately", () => {
@@ -821,6 +830,188 @@ test("Second-hand detection (Dolap, Gardrops, sahibinden) classifies conditions,
   const zeroKeyRes = await searchSecondHandTurkey("stradivarius gömlek", { serperKey: "", serpApiKey: "" });
   assert.equal(zeroKeyRes.quickLinks.length, 3);
   assert.equal(zeroKeyRes.liveIndexed, false);
+});
+
+test("v9 Feature 1: Web Push config, endpoint validation, DB persistence, and watchlist price-drop alert detection", () => {
+  const cfg = getPushConfig();
+  assert.equal(cfg.supported, true);
+  assert.ok(typeof cfg.publicKey === "string" && cfg.publicKey.length > 40);
+
+  // Endpoint security validation
+  assert.equal(isValidPushEndpoint("https://web.push.apple.com/QAbc123xyz"), true);
+  assert.equal(isValidPushEndpoint("https://fcm.googleapis.com/fcm/send/abc"), true);
+  assert.equal(isValidPushEndpoint("http://web.push.apple.com/insecure"), false);
+  assert.equal(isValidPushEndpoint("https://localhost:3456/push"), false);
+  assert.equal(isValidPushEndpoint("https://127.0.0.1/push"), false);
+
+  // DB round-trip with cleanup
+  const testEndpoint = `https://web.push.apple.com/__test_v9_${Date.now()}`;
+  try {
+    savePushSubscription({ endpoint: testEndpoint, keys: { p256dh: "p256_test_key", auth: "auth_test_key" } }, "iPhone");
+    const subs = getPushSubscriptions();
+    assert.ok(subs.some((s) => s.endpoint === testEndpoint));
+  } finally {
+    removePushSubscription(testEndpoint);
+    assert.ok(!getPushSubscriptions().some((s) => s.endpoint === testEndpoint));
+  }
+
+  // Watchlist alert detection: target hit, sharp drop (>=10%), and no duplicate when unchanged
+  const before = [
+    { id: "w1", title: "iPhone 17 256 GB", url: "https://ex.com/1", target_price: 70000, last_net_price: 74000, targetReached: false },
+    { id: "w2", title: "Philips Airfryer XXL", url: "https://ex.com/2", target_price: null, last_net_price: 7000, targetReached: false },
+    { id: "w3", title: "Dyson V15", url: "https://ex.com/3", target_price: 25000, last_net_price: 24000, targetReached: true },
+  ];
+  const after = [
+    { id: "w1", title: "iPhone 17 256 GB", url: "https://ex.com/1", target_price: 70000, last_net_price: 69500, best_store: "Amazon Türkiye", targetReached: true },
+    { id: "w2", title: "Philips Airfryer XXL", url: "https://ex.com/2", target_price: null, last_net_price: 6200, best_store: "Hepsiburada", targetReached: false },
+    { id: "w3", title: "Dyson V15", url: "https://ex.com/3", target_price: 25000, last_net_price: 24000, best_store: "Dyson", targetReached: true },
+  ];
+  const alerts = detectWatchlistPushAlerts(before, after);
+  assert.equal(alerts.length, 2);
+  assert.equal(alerts[0].type, "target_hit");
+  assert.equal(alerts[0].itemId, "w1");
+  assert.equal(alerts[1].type, "price_drop");
+  assert.equal(alerts[1].itemId, "w2");
+  assert.ok(alerts[1].dropPct >= 10);
+});
+
+test("v9 Feature 6: Authenticity, Official TR Warranty vs Importer Warranty, Refurbished/Demo & Seller Trust Shield", () => {
+  // 1. Importer warranty vs Official TR Distributor
+  const importer = analyzeOfferAuthenticity(
+    {
+      offerTitle: "Apple iPhone 16 Pro 256 GB İthalatçı Garantili",
+      store: parseStoreInfo("n11", "/ucuzgsm"),
+      url: "https://www.n11.com/urun/iphone-16",
+    },
+    "iPhone 16 Pro 256 GB"
+  );
+  assert.equal(importer.warranty, "importer");
+  assert.equal(importer.isAuthorized, false);
+  assert.equal(importer.trustTier, "caution");
+
+  const official = analyzeOfferAuthenticity(
+    {
+      offerTitle: "Apple iPhone 16 Pro 256 GB Apple Türkiye Garantili",
+      store: parseStoreInfo("MediaMarkt", ""),
+      url: "https://www.mediamarkt.com.tr/tr/product/iphone-16",
+    },
+    "iPhone 16 Pro 256 GB"
+  );
+  assert.equal(official.warranty, "distributor");
+  assert.equal(official.isAuthorized, true);
+  assert.equal(official.trustTier, "verified");
+
+  // 2. Refurbished & Demo detection
+  const refurb = analyzeOfferAuthenticity(
+    {
+      offerTitle: "Apple iPhone 15 128 GB Yenilenmiş A Kalite",
+      store: parseStoreInfo("EasyCep", ""),
+      url: "https://easycep.com/iphone-15",
+    },
+    "iPhone 15 128 GB"
+  );
+  assert.equal(refurb.condition, "refurbished");
+  assert.equal(refurb.isAuthorized, false);
+  assert.equal(refurb.trustTier, "caution");
+
+  const demo = analyzeOfferAuthenticity(
+    {
+      offerTitle: "Philips Airfryer XXL Teşhir Ürünü Açık Kutu",
+      store: parseStoreInfo("Trendyol", "/outletmagaza"),
+      url: "https://trendyol.com/p/1",
+    },
+    "Philips Airfryer XXL"
+  );
+  assert.equal(demo.condition, "demo");
+  assert.equal(demo.trustTier, "caution");
+
+  // 3. Perfume / Luxury high-counterfeit category: Sephora verified vs random 3rd-party caution
+  const sephora = analyzeOfferAuthenticity(
+    {
+      offerTitle: "Dior Sauvage EDP 100 ml Erkek Parfüm",
+      store: parseStoreInfo("Sephora", ""),
+      url: "https://www.sephora.com.tr/p/dior-sauvage",
+    },
+    "Dior Sauvage EDP 100 ml"
+  );
+  assert.equal(sephora.isHighRiskCategory, true);
+  assert.equal(sephora.isAuthorized, true);
+  assert.equal(sephora.trustTier, "verified");
+
+  const thirdParty = analyzeOfferAuthenticity(
+    {
+      offerTitle: "Dior Sauvage EDP 100 ml Erkek Parfüm",
+      store: parseStoreInfo("n11", "/ucuzparfum34"),
+      url: "https://www.n11.com/urun/dior-sauvage",
+    },
+    "Dior Sauvage EDP 100 ml"
+  );
+  assert.equal(thirdParty.isHighRiskCategory, true);
+  assert.equal(thirdParty.isAuthorized, false);
+  assert.equal(thirdParty.trustTier, "caution");
+
+  // 4. Full analyzeOffers integration: Trust Shield picks official over refurbished/importer for Best Value
+  const analyzed = analyzeOffers(
+    [
+      {
+        id: "r1",
+        offerTitle: "Apple iPhone 16 Pro 256 GB Yenilenmiş",
+        basePrice: 62000,
+        shipping: parseShipping("Ücretsiz kargo"),
+        store: parseStoreInfo("EasyCep", ""),
+        inStock: true,
+        delivery: parseDeliverySpeed("2 gün"),
+        url: "https://easycep.com/1",
+      },
+      {
+        id: "i1",
+        offerTitle: "Apple iPhone 16 Pro 256 GB İthalatçı Garantili",
+        basePrice: 74000,
+        shipping: parseShipping("Ücretsiz kargo"),
+        store: parseStoreInfo("n11", "/ucuzgsm"),
+        inStock: true,
+        delivery: parseDeliverySpeed("2 gün"),
+        url: "https://n11.com/2",
+      },
+      {
+        id: "o1",
+        offerTitle: "Apple iPhone 16 Pro 256 GB Apple Türkiye Garantili",
+        basePrice: 75999,
+        shipping: parseShipping("Ücretsiz kargo"),
+        store: parseStoreInfo("MediaMarkt", ""),
+        inStock: true,
+        delivery: parseDeliverySpeed("Yarın kargoda"),
+        url: "https://mediamarkt.com.tr/3",
+      },
+    ],
+    null,
+    { productTitle: "Apple iPhone 16 Pro 256 GB" }
+  );
+
+  assert.equal(analyzed.trustSummary.refurbishedCount, 1);
+  assert.equal(analyzed.trustSummary.importerCount, 1);
+  assert.equal(analyzed.trustSummary.authorizedCount, 1);
+  assert.equal(analyzed.trustSummary.cheapestAuthorized.netPrice, 75999);
+  // Best Value must favor official TR warranty MediaMarkt over importer/refurbished!
+  assert.equal(analyzed.picks.bestValue.id, "o1");
+  // Cheapest brand-new pick skips refurbished EasyCep!
+  assert.equal(analyzed.picks.cheapestNet.id, "i1");
+});
+
+test("v9 Feature 7: extractSharedQuery extracts Turkish store links or text from Apple Shortcuts / Share Sheet payloads", () => {
+  assert.equal(
+    extractSharedQuery({ text: "Apple iPhone 17 Pro 256 GB Siyah https://ty.gl/abc123!" }),
+    "https://ty.gl/abc123"
+  );
+  assert.equal(
+    extractSharedQuery({ url: "https://www.hepsiburada.com/dyson-v15-p-HBV123", title: "Dyson V15" }),
+    "https://www.hepsiburada.com/dyson-v15-p-HBV123"
+  );
+  assert.equal(
+    extractSharedQuery({ text: "  Gucci   Güneş   Gözlüğü  " }),
+    "Gucci Güneş Gözlüğü"
+  );
+  assert.equal(extractSharedQuery({}), "");
 });
 
 

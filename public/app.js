@@ -14,6 +14,14 @@ import {
   stopVoiceSearch,
 } from "./mediaSearch.js";
 import { generatePriceCard, sharePriceCardBlob } from "./shareCard.js";
+import {
+  getCurrentPushSubscription,
+  getPushEnvironment,
+  sendTestPush,
+  subscribeToPush,
+  syncExistingPushSubscription,
+  unsubscribeFromPush,
+} from "./pushClient.js";
 
 const DEFAULT_WATCHLIST_FOLDERS = [
   "Teknoloji",
@@ -42,6 +50,8 @@ const state = {
     variantAttr: null, // { group: 'capacity'|'color'|'size'|'volume', value: string }
   },
   isListening: false,
+  pushSubscribed: false,
+  pushBusy: false,
   shareCard: {
     blob: null,
     dataUrl: "",
@@ -60,6 +70,8 @@ const state = {
     inStockOnly: false,
     hideOutliers: false,
     hideSuspicious: false,
+    authorizedOnly: false,
+    hideImporterAndRefurb: false,
     storeSearch: "",
   },
   compareBasket: loadLocalCompare(), // [{ id, title, url, image, lowestPrice }]
@@ -78,6 +90,14 @@ const state = {
 const $ = (id) => document.getElementById(id);
 
 const els = {
+  openShortcutsBtn: $("openShortcutsBtn"),
+  shortcutsModal: $("shortcutsModal"),
+  closeShortcutsBtn: $("closeShortcutsBtn"),
+  shortcutShareBaseUrl: $("shortcutShareBaseUrl"),
+  copyShortcutShareUrlBtn: $("copyShortcutShareUrlBtn"),
+  shortcutApiBaseUrl: $("shortcutApiBaseUrl"),
+  copyShortcutApiUrlBtn: $("copyShortcutApiUrlBtn"),
+  shortcutQuickGrid: $("shortcutQuickGrid"),
   themeToggleBtn: $("themeToggleBtn"),
   themeIconMoon: $("themeIconMoon"),
   themeIconSun: $("themeIconSun"),
@@ -171,6 +191,7 @@ const els = {
   optimizeCartBtn: $("optimizeCartBtn"),
   clearCartBtn: $("clearCartBtn"),
   newFolderBtn: $("newFolderBtn"),
+  pushAlertCard: $("pushAlertCard"),
   watchlistFolderBar: $("watchlistFolderBar"),
   watchlistBudgetSummary: $("watchlistBudgetSummary"),
   watchlistContainer: $("watchlistContainer"),
@@ -1384,6 +1405,9 @@ function renderSearchResults() {
           <div style="display:flex;flex-wrap:wrap;gap:5px;align-items:center;">
             ${p.badge ? `<span class="offer-pill">${esc(p.badge)}</span>` : ""}
             ${colorLabel ? `<span class="color-tag">${renderColorSwatch(colorLabel)}${esc(colorLabel)}</span>` : ""}
+            ${p.trustShield?.condition === "refurbished" ? `<span class="mini-badge warn">♻ Yenilenmiş</span>` : ""}
+            ${p.trustShield?.condition === "demo" ? `<span class="mini-badge trap">⚠ Teşhir</span>` : ""}
+            ${p.trustShield?.warranty === "importer" ? `<span class="mini-badge warn">⚠ İthalatçı</span>` : ""}
             ${p.isListingPage ? `<span class="mini-badge fast">Kategori Sayfası</span>` : ""}
             ${p.priceSource === "installment" ? `<span class="mini-badge fast" title="Peşin fiyatına taksit bilgisinden toplam tutar olarak hesaplandı">Peşin Toplam</span>` : ""}
             ${p.isAccessory ? `<span class="mini-badge trap">Aksesuar</span>` : ""}
@@ -1443,6 +1467,8 @@ async function openProductDetail(url, refresh = false, fallbackTitle = "") {
       inStockOnly: false,
       hideOutliers: false,
       hideSuspicious: Boolean(detail.stats?.suspiciousLowCount > 0),
+      authorizedOnly: false,
+      hideImporterAndRefurb: false,
       storeSearch: "",
     };
 
@@ -1465,6 +1491,67 @@ function computeInstallment(principal, months, monthlyRatePct) {
   const total = Math.round(monthly * months * 100) / 100;
   const extra = Math.round(Math.max(0, total - principal) * 100) / 100;
   return { monthly, total, extra };
+}
+
+function renderTrustShieldPanel(ts, stats) {
+  if (!ts) return "";
+  const hasWarnings = ts.importerCount > 0 || ts.refurbishedCount > 0 || ts.demoCount > 0;
+  const showPanel = hasWarnings || ts.isHighRiskCategory || ts.distributorCount > 0;
+  if (!showPanel) return "";
+
+  const panelTone = hasWarnings || (ts.isHighRiskCategory && ts.cautionCount > 0) ? "caution" : "verified";
+  const pills = [];
+  if (ts.authorizedCount > 0) {
+    pills.push(`<span class="trust-pill good">🛡 ${ts.authorizedCount} Yetkili / Resmi Satıcı</span>`);
+  }
+  if (ts.distributorCount > 0) {
+    pills.push(`<span class="trust-pill good">✓ ${ts.distributorCount} TR Resmi Garanti</span>`);
+  }
+  if (ts.importerCount > 0) {
+    pills.push(`<span class="trust-pill warn">⚠ ${ts.importerCount} İthalatçı Garantili</span>`);
+  }
+  if (ts.refurbishedCount > 0) {
+    pills.push(`<span class="trust-pill warn">♻ ${ts.refurbishedCount} Yenilenmiş / Outlet</span>`);
+  }
+  if (ts.demoCount > 0) {
+    pills.push(`<span class="trust-pill bad">⚠ ${ts.demoCount} Teşhir / Açık Kutu</span>`);
+  }
+  if (ts.isHighRiskCategory) {
+    pills.push(`<span class="trust-pill warn">Orijinallik Öncelikli Kategori</span>`);
+  }
+
+  const bestAuth = ts.cheapestAuthorized;
+  return `
+    <section class="trust-shield-panel ${panelTone}">
+      <div class="trust-shield-head">
+        <h3 class="trust-shield-title">🛡 Orijinallik, Garanti & Satıcı Güven Kalkanı</h3>
+        <div class="trust-shield-pills">${pills.join("")}</div>
+      </div>
+      ${ts.recommendationNote ? `<p class="trust-shield-note">${esc(ts.recommendationNote)}</p>` : ""}
+      ${
+        bestAuth
+          ? `
+        <div class="trust-shield-best-auth">
+          <div>
+            <strong>En Ucuz Yetkili / Güvenilir Seçenek:</strong>
+            <span>${esc(bestAuth.store)}</span> ·
+            <strong class="mono" style="color:var(--good);">${fmtTL(bestAuth.netPrice)}</strong>
+            ${bestAuth.warrantyLabel ? `<span class="mini-badge official" style="margin-left:6px;">${esc(bestAuth.warrantyLabel)}</span>` : ""}
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            ${
+              ts.authorizedCount > 0 && ts.authorizedCount < (stats?.offerCountAnalyzed || 0)
+                ? `<button type="button" id="trustFilterAuthQuickBtn" class="btn btn-secondary btn-sm">${state.offerFilters.authorizedOnly ? "✓ Sadece Yetkili Aktif" : "Sadece Yetkilileri Göster"}</button>`
+                : ""
+            }
+            <a href="${esc(bestAuth.url)}" target="_blank" rel="noopener noreferrer" class="btn btn-good btn-sm">Yetkili Mağaza ↗</a>
+          </div>
+        </div>
+      `
+          : ""
+      }
+    </section>
+  `;
 }
 
 function renderFakeDiscountPanel(fd) {
@@ -1690,6 +1777,9 @@ function renderDetailView() {
     <!-- Campaign & Fake-Discount Radar ("Bindirim → İndirim" Detector) -->
     ${renderFakeDiscountPanel(d.fakeDiscount)}
 
+    <!-- Authenticity, Official TR Warranty vs Importer Warranty & Seller Trust Shield -->
+    ${renderTrustShieldPanel(d.trustSummary, stats)}
+
     <!-- Top 3 Picks -->
     ${
       picks
@@ -1756,7 +1846,7 @@ function renderDetailView() {
       <div class="panel-header">
         <div>
           <h3>Tüm Mağaza Teklifleri (Kargo Dahil Net Sıralama)</h3>
-          <p class="muted-text">Fiyatlar kargo maliyeti eklenerek net toplam üzerinden sıralanır; fırsat skoru fiyat, satıcı güveni, kargo ve teslimat hızını birleştirir.</p>
+          <p class="muted-text">Fiyatlar kargo maliyeti eklenerek net toplam üzerinden sıralanır; fırsat skoru fiyat, satıcı güveni, garanti durumu, kargo ve teslimat hızını birleştirir.</p>
         </div>
 
         <div class="table-filters">
@@ -1765,6 +1855,26 @@ function renderDetailView() {
             <input type="checkbox" id="filterFreeShipping" ${state.offerFilters.freeShippingOnly ? "checked" : ""} />
             Ücretsiz Kargo
           </label>
+          ${
+            d.trustSummary?.authorizedCount > 0
+              ? `
+            <label class="checkbox-pill">
+              <input type="checkbox" id="filterAuthorizedOnly" ${state.offerFilters.authorizedOnly ? "checked" : ""} />
+              🛡 Yetkili Satıcı (${d.trustSummary.authorizedCount})
+            </label>
+          `
+              : ""
+          }
+          ${
+            (d.trustSummary?.importerCount || 0) + (d.trustSummary?.refurbishedCount || 0) + (d.trustSummary?.demoCount || 0) > 0
+              ? `
+            <label class="checkbox-pill">
+              <input type="checkbox" id="filterHideImporterRefurb" ${state.offerFilters.hideImporterAndRefurb ? "checked" : ""} />
+              İthalatçı / Yenilenmiş Gizle
+            </label>
+          `
+              : ""
+          }
           <label class="checkbox-pill">
             <input type="checkbox" id="filterHideOutliers" ${state.offerFilters.hideOutliers ? "checked" : ""} />
             Fahişleri Gizle
@@ -1977,12 +2087,30 @@ function renderDetailView() {
   });
 
   // Bind detail-level controls
+  $("trustFilterAuthQuickBtn")?.addEventListener("click", () => {
+    state.offerFilters.authorizedOnly = !state.offerFilters.authorizedOnly;
+    const cb = $("filterAuthorizedOnly");
+    if (cb) cb.checked = state.offerFilters.authorizedOnly;
+    const btn = $("trustFilterAuthQuickBtn");
+    if (btn) btn.textContent = state.offerFilters.authorizedOnly ? "✓ Sadece Yetkili Aktif" : "Sadece Yetkilileri Göster";
+    renderOffersTableBody();
+  });
   $("offerStoreFilter")?.addEventListener("input", (e) => {
     state.offerFilters.storeSearch = e.target.value;
     renderOffersTableBody();
   });
   $("filterFreeShipping")?.addEventListener("change", (e) => {
     state.offerFilters.freeShippingOnly = e.target.checked;
+    renderOffersTableBody();
+  });
+  $("filterAuthorizedOnly")?.addEventListener("change", (e) => {
+    state.offerFilters.authorizedOnly = e.target.checked;
+    const btn = $("trustFilterAuthQuickBtn");
+    if (btn) btn.textContent = state.offerFilters.authorizedOnly ? "✓ Sadece Yetkili Aktif" : "Sadece Yetkilileri Göster";
+    renderOffersTableBody();
+  });
+  $("filterHideImporterRefurb")?.addEventListener("change", (e) => {
+    state.offerFilters.hideImporterAndRefurb = e.target.checked;
     renderOffersTableBody();
   });
   $("filterHideOutliers")?.addEventListener("change", (e) => {
@@ -2127,6 +2255,17 @@ function renderOffersTableBody() {
 
   if (state.offerFilters.freeShippingOnly) {
     list = list.filter((o) => o.shipping?.isFree);
+  }
+  if (state.offerFilters.authorizedOnly) {
+    list = list.filter((o) => o.trustShield?.isAuthorized || o.store?.isOfficialSeller);
+  }
+  if (state.offerFilters.hideImporterAndRefurb) {
+    list = list.filter(
+      (o) =>
+        o.trustShield?.warranty !== "importer" &&
+        o.trustShield?.condition !== "refurbished" &&
+        o.trustShield?.condition !== "demo"
+    );
   }
   if (state.offerFilters.hideOutliers) {
     list = list.filter((o) => !o.isOutlier);
@@ -2893,7 +3032,72 @@ function renderWatchFakeDiscountBadge(w) {
   return "";
 }
 
+function renderPushAlertCard() {
+  if (!els.pushAlertCard) return;
+  const env = getPushEnvironment();
+  els.pushAlertCard.hidden = false;
+
+  if (env.needsHomeScreenInstall) {
+    els.pushAlertCard.className = "push-alert-card ios-guide";
+    els.pushAlertCard.innerHTML = `
+      <div class="push-alert-copy">
+        <span class="push-alert-icon" aria-hidden="true">🔔</span>
+        <div>
+          <p class="push-alert-title">iPhone Kilit Ekranı Bildirimleri (Telegramsız)</p>
+          <p class="push-alert-desc">iPhone'da bildirim alabilmek için önce Safari alt menüsünden <strong>Paylaş (↑) → Ana Ekrana Ekle</strong> yapın, ardından ana ekrandaki FiyatRadar ikonundan açarak bildirimleri tek dokunuşla açın.</p>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  if (!env.supported) {
+    els.pushAlertCard.hidden = true;
+    return;
+  }
+
+  if (state.pushSubscribed) {
+    els.pushAlertCard.className = "push-alert-card active";
+    els.pushAlertCard.innerHTML = `
+      <div class="push-alert-copy">
+        <span class="push-alert-icon" aria-hidden="true">✓</span>
+        <div>
+          <p class="push-alert-title">Kilit Ekranı Bildirimleri Aktif</p>
+          <p class="push-alert-desc">Takip ettiğiniz bir ürün hedef fiyata indiğinde veya %10+ düştüğünde doğrudan cihazınıza bildirim düşer.</p>
+        </div>
+      </div>
+      <div class="push-alert-actions">
+        <button type="button" class="btn btn-secondary btn-sm" data-push-action="test" ${state.pushBusy ? "disabled" : ""}>Test Bildirimi Gönder</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-push-action="disable" ${state.pushBusy ? "disabled" : ""}>Kapat</button>
+      </div>
+    `;
+    return;
+  }
+
+  const denied = env.permission === "denied";
+  els.pushAlertCard.className = `push-alert-card ${denied ? "ios-guide" : ""}`;
+  els.pushAlertCard.innerHTML = `
+    <div class="push-alert-copy">
+      <span class="push-alert-icon" aria-hidden="true">🔔</span>
+      <div>
+        <p class="push-alert-title">iPhone / Cihaz Kilit Ekranı Bildirimleri</p>
+        <p class="push-alert-desc">${
+          denied
+            ? "Bildirim izni kapalı görünüyor. iPhone Ayarlar > Bildirimler > FiyatRadar menüsünden izin verip tekrar deneyebilirsiniz."
+            : "Hedef fiyata inen veya %10+ düşen ürünlerde Telegram gerekmeden doğrudan kilit ekranınıza anında haber gelsin."
+        }</p>
+      </div>
+    </div>
+    <div class="push-alert-actions">
+      <button type="button" class="btn btn-primary btn-sm" data-push-action="enable" ${state.pushBusy ? "disabled" : ""}>
+        ${state.pushBusy ? "Etkinleştiriliyor..." : "🔔 Bildirimleri Aç"}
+      </button>
+    </div>
+  `;
+}
+
 function renderWatchlistView() {
+  renderPushAlertCard();
   const list = state.watchlist;
   els.refreshWatchlistBtn.hidden = list.length === 0;
 
@@ -3639,6 +3843,34 @@ function bindEvents() {
     showToast(`"${clean}" klasörü oluşturuldu.`);
   });
 
+  // Native iOS / Desktop Web Push alert controls (Watchlist view)
+  els.pushAlertCard?.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-push-action]");
+    if (!btn || state.pushBusy) return;
+    const action = btn.dataset.pushAction;
+    state.pushBusy = true;
+    renderPushAlertCard();
+    try {
+      if (action === "enable") {
+        await subscribeToPush(apiFetch);
+        state.pushSubscribed = true;
+        showToast("✓ Kilit ekranı bildirimleri aktifleştirildi!");
+      } else if (action === "test") {
+        await sendTestPush(apiFetch);
+        showToast("Test bildirimi gönderildi — kilit ekranınızı veya bildirim çubuğunuzu kontrol edin.");
+      } else if (action === "disable") {
+        await unsubscribeFromPush(apiFetch);
+        state.pushSubscribed = false;
+        showToast("Kilit ekranı bildirimleri kapatıldı.");
+      }
+    } catch (err) {
+      showToast(err.message || "Bildirim işlemi tamamlanamadı.");
+    } finally {
+      state.pushBusy = false;
+      renderPushAlertCard();
+    }
+  });
+
   els.refreshWatchlistBtn.addEventListener("click", async () => {
     els.refreshWatchlistBtn.disabled = true;
     setStatus("loading", "Takip listesindeki tüm ürünlerin canlı fiyatları güncelleniyor...");
@@ -3655,10 +3887,11 @@ function bindEvents() {
       setStatus(null);
       renderWatchlistView();
       const hits = state.watchlist.filter((w) => w.targetReached).length;
+      const pushNote = res.pushSentCount > 0 ? " (Bildirim gönderildi!)" : "";
       showToast(
         hits > 0
-          ? `Fiyatlar güncellendi! ${hits} ürün hedef fiyatınıza ulaştı.`
-          : "Tüm takip edilen ürünlerin fiyatları güncellendi."
+          ? `Fiyatlar güncellendi! ${hits} ürün hedef fiyatınıza ulaştı.${pushNote}`
+          : `Tüm takip edilen ürünlerin fiyatları güncellendi.${pushNote}`
       );
     } catch (err) {
       setStatus("error", err.message);
@@ -3690,6 +3923,33 @@ function bindEvents() {
     }
   });
 
+  // Apple Shortcuts & Haptic Touch Modal handlers
+  els.openShortcutsBtn?.addEventListener("click", openShortcutsModal);
+  els.closeShortcutsBtn?.addEventListener("click", closeShortcutsModal);
+  els.shortcutsModal?.addEventListener("click", (e) => {
+    if (e.target === els.shortcutsModal) closeShortcutsModal();
+  });
+  els.copyShortcutShareUrlBtn?.addEventListener("click", () => {
+    const val = els.shortcutShareBaseUrl?.textContent || "";
+    copyTextWithFeedback(val, "Paylaşım kestirme adresi kopyalandı!");
+  });
+  els.copyShortcutApiUrlBtn?.addEventListener("click", () => {
+    const val = els.shortcutApiBaseUrl?.textContent || "";
+    copyTextWithFeedback(val, "Hızlı API adresi kopyalandı!");
+  });
+  els.shortcutQuickGrid?.addEventListener("click", (e) => {
+    const copyBtn = e.target.closest("[data-copy-shortcut]");
+    if (copyBtn) {
+      copyTextWithFeedback(copyBtn.dataset.copyShortcut, "Kestirme bağlantısı kopyalandı!");
+      return;
+    }
+    const runBtn = e.target.closest("[data-run-shortcut]");
+    if (runBtn) {
+      closeShortcutsModal();
+      handleLaunchUrl(runBtn.dataset.runShortcut);
+    }
+  });
+
   // Settings Modal handlers
   els.openSettingsBtn?.addEventListener("click", openSettingsModal);
   els.closeSettingsBtn?.addEventListener("click", closeSettingsModal);
@@ -3703,6 +3963,7 @@ function bindEvents() {
       if (els.scannerModal && !els.scannerModal.hidden) closeScannerModal();
       if (els.photoSearchModal && !els.photoSearchModal.hidden) closePhotoModal();
       if (els.shareCardModal && !els.shareCardModal.hidden) closeShareCardModal();
+      if (els.shortcutsModal && !els.shortcutsModal.hidden) closeShortcutsModal();
       if (els.settingsModal && !els.settingsModal.hidden) closeSettingsModal();
     }
   });
@@ -3971,6 +4232,153 @@ function closeShareCardModal() {
   if (els.shareCardModal) els.shareCardModal.hidden = true;
 }
 
+async function copyTextWithFeedback(text, successMsg) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast(successMsg || "Panoya kopyalandı.");
+  } catch {
+    showToast("Kopyalama desteklenmiyor; adresi manuel seçebilirsiniz.");
+  }
+}
+
+function openShortcutsModal() {
+  if (!els.shortcutsModal) return;
+  const origin = window.location.origin;
+  if (els.shortcutShareBaseUrl) {
+    els.shortcutShareBaseUrl.textContent = `${origin}/share?text=`;
+  }
+  if (els.shortcutApiBaseUrl) {
+    els.shortcutApiBaseUrl.textContent = `${origin}/api/shortcut-search?text=`;
+  }
+  if (els.shortcutQuickGrid) {
+    const actions = [
+      {
+        title: "📷 Barkod Tara",
+        desc: "Mağazada barkod okutup anında kıyasla",
+        path: "/?action=scan",
+      },
+      {
+        title: "🎙️ Sesli Ara",
+        desc: "Türkçe sesle doğrudan ürün arat",
+        path: "/?action=voice",
+      },
+      {
+        title: "🛒 Sepet Optimizatörü",
+        desc: "Tek mağaza vs karışık sepet kargo hesabı",
+        path: "/?view=cart",
+      },
+      {
+        title: "🔔 Takip Listem",
+        desc: "Klasörler, bütçe ve hedef fiyat alarmları",
+        path: "/?view=watchlist",
+      },
+    ];
+    els.shortcutQuickGrid.innerHTML = actions
+      .map((a) => {
+        const full = `${origin}${a.path}`;
+        return `
+        <div class="shortcut-action-card">
+          <strong>${esc(a.title)}</strong>
+          <span>${esc(a.desc)}</span>
+          <div class="shortcut-action-btns">
+            <button type="button" class="btn btn-secondary btn-sm" data-copy-shortcut="${esc(full)}">Kopyala</button>
+            <button type="button" class="btn btn-ghost btn-sm" data-run-shortcut="${esc(full)}">Şimdi Dene</button>
+          </div>
+        </div>`;
+      })
+      .join("");
+  }
+  els.shortcutsModal.hidden = false;
+}
+
+function closeShortcutsModal() {
+  if (els.shortcutsModal) els.shortcutsModal.hidden = true;
+}
+
+function extractUrlFromSharedText(str) {
+  const txt = String(str || "").trim();
+  const m = txt.match(/https?:\/\/[^\s"'<>]+/i);
+  return m ? m[0].replace(/[),.;!?]+$/, "") : txt;
+}
+
+/**
+ * Handles iOS Home-Screen long-press shortcuts (/?action=scan|voice|photo, /?view=cart|watchlist),
+ * Apple Shortcuts / Share Sheet links (/?q=..., /?url=..., /?text=...),
+ * and iPhone Lock-Screen Push Notification clicks (/?product=...&title=...).
+ */
+function handleLaunchUrl(rawUrl) {
+  let u;
+  try {
+    u = new URL(rawUrl, window.location.origin);
+  } catch {
+    return;
+  }
+  const sp = u.searchParams;
+  const productUrl = sp.get("product");
+  const productTitle = sp.get("title") || "";
+  const queryParam = sp.get("q") || sp.get("url") || sp.get("text") || "";
+  const action = (sp.get("action") || "").toLowerCase();
+  const view = (sp.get("view") || "").toLowerCase();
+
+  // Clean query params from browser URL bar without reload
+  if (rawUrl === window.location.href && (productUrl || queryParam || action || view || sp.get("from"))) {
+    try {
+      window.history.replaceState({}, "", "/");
+    } catch {
+      // Ignore
+    }
+  }
+
+  if (productUrl) {
+    openProductDetail(productUrl, false, productTitle);
+    return;
+  }
+
+  if (queryParam) {
+    const cleanQ = extractUrlFromSharedText(queryParam);
+    if (cleanQ) {
+      performSearch(cleanQ);
+      return;
+    }
+  }
+
+  if (action === "scan") {
+    switchView("search");
+    setTimeout(() => openScannerModal(), 150);
+    return;
+  }
+  if (action === "voice") {
+    switchView("search");
+    setTimeout(() => handleVoiceToggle(), 220);
+    return;
+  }
+  if (action === "photo") {
+    switchView("search");
+    setTimeout(() => els.photoSearchInput?.click(), 180);
+    return;
+  }
+
+  if (["compare", "cart", "watchlist", "history", "search"].includes(view)) {
+    switchView(view);
+  }
+}
+
+async function initPushClient() {
+  try {
+    const existing = await getCurrentPushSubscription();
+    state.pushSubscribed = Boolean(existing);
+    if (state.activeView === "watchlist") renderPushAlertCard();
+    if (existing) {
+      const synced = await syncExistingPushSubscription(apiFetch);
+      state.pushSubscribed = Boolean(synced);
+      if (state.activeView === "watchlist") renderPushAlertCard();
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
 function openSettingsModal() {
   if (!els.settingsModal) return;
   const { serperKey, serpApiKey } = getStoredApiKeys();
@@ -3986,9 +4394,19 @@ function closeSettingsModal() {
 }
 
 function initPwa() {
-  // Register Service Worker
+  // Register Service Worker & handle Lock-Screen Push Notification clicks while app is open
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js").catch(() => {});
+    navigator.serviceWorker.addEventListener("message", (event) => {
+      if (event.data?.type === "FIYATRADAR_NAVIGATE" && event.data?.url) {
+        handleLaunchUrl(event.data.url);
+      }
+    });
+  }
+
+  // Clear iOS Home-Screen notification badge when user opens the app
+  if (typeof navigator.clearAppBadge === "function") {
+    navigator.clearAppBadge().catch(() => {});
   }
 
   // Show smart install guide ONLY on iOS Safari when not yet added to Home Screen
@@ -4017,3 +4435,5 @@ apiFetch("/api/providers")
   .then((p) => updateApiStatusDot(Boolean(p.googleShoppingReady)))
   .catch(() => {});
 loadWatchlist();
+initPushClient();
+handleLaunchUrl(window.location.href);

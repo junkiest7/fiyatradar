@@ -23,5 +23,44 @@
       "type": "image/png",
       "purpose": "any maskable"
     }
-  ]
+  ],
+  "shortcuts": [
+    {
+      "name": "Barkod Tara",
+      "short_name": "Barkod",
+      "description": "Mağazada barkod okutup internetle kıyasla",
+      "url": "/?action=scan",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Sesli Ara",
+      "short_name": "Sesli Ara",
+      "description": "Ürün adını söyleyerek anında ara",
+      "url": "/?action=voice",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Sepet Optimizatörü",
+      "short_name": "Sepet",
+      "description": "Tek mağaza vs karışık sepet kargo hesabı",
+      "url": "/?view=cart",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Takip Listem",
+      "short_name": "Takip",
+      "description": "Hedef fiyat alarmları ve bütçe klasörleri",
+      "url": "/?view=watchlist",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
+  ],
+  "share_target": {
+    "action": "/share",
+    "method": "GET",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  }
 }

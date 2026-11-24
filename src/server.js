@@ -17,11 +17,14 @@ import {
 import {
   clearSearchHistory,
   getPriceSnapshots,
+  getPushSubscriptions,
   getSearchHistory,
   getWatchlist,
   recordSearch,
   recordSnapshot,
+  removePushSubscription,
   removeWatchlistItem,
+  savePushSubscription,
   summarizeWatchlistBudget,
   updateWatchlistItem,
   upsertWatchlistItem,
@@ -29,11 +32,19 @@ import {
 import { resolveBarcode, searchSecondHandTurkey, testSerperKey } from "./providers.js";
 import { optimizeCart } from "./optimizer.js";
 import {
+  analyzeOfferAuthenticity,
   extractVariantAttributes,
   formatTrNumber,
   suggestWatchlistFolder,
   WATCHLIST_FOLDERS,
 } from "./parsers.js";
+import {
+  broadcastPush,
+  getPushConfig,
+  isValidPushEndpoint,
+  notifyWatchlistPriceDrops,
+  sendPushToSubscription,
+} from "./push.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, "..", "public");
@@ -223,13 +234,32 @@ app.get("/api/search", async (req, res) => {
       }
     }
 
-    const enrichedProducts = list.map((p) => ({
-      ...p,
-      variantAttrs:
-        p.badge === "Tüm Mağazalar"
+    const enrichedProducts = list.map((p) => {
+      const isSummary = p.badge === "Tüm Mağazalar";
+      const isAggregatorCard = String(p.source || "").toLowerCase() === "akakçe";
+      const shield = isSummary
+        ? null
+        : analyzeOfferAuthenticity(
+            {
+              offerTitle: p.title,
+              store: {
+                platform: isAggregatorCard ? "" : p.source || p.badge || "",
+                seller: "",
+                displayName: isAggregatorCard ? "" : p.source || p.badge || "",
+                isOfficialSeller: isAggregatorCard ? false : Boolean(p.isOfficialStore),
+              },
+              url: p.externalUrl || "",
+            },
+            q
+          );
+      return {
+        ...p,
+        variantAttrs: isSummary
           ? { capacity: null, color: null, size: null, volume: null }
           : p.variantAttrs || extractVariantAttributes(p.title, p.isListingPage ? "" : p.externalUrl || ""),
-    }));
+        trustShield: shield,
+      };
+    });
 
     res.json({
       ...result,
@@ -569,47 +599,219 @@ app.delete("/api/watchlist/:id", (req, res) => {
   res.json({ ok: true, items, budget: summarizeWatchlistBudget(items) });
 });
 
-// Live batch refresh of all watched items (with automatic API key forwarding + virtual URL re-hydration)
+async function refreshAllWatchlistAndNotify(keys = {}) {
+  const before = getWatchlist();
+  const results = [];
+  for (const item of before) {
+    try {
+      const detail = await getProductDetail(item.url, {
+        refresh: true,
+        fallbackQuery: item.title,
+        ...keys,
+      });
+      upsertWatchlistItem({
+        id: item.id,
+        title: detail.title,
+        url: item.url,
+        image: detail.image,
+        folder: item.folder,
+        target_price: item.target_price,
+        last_net_price: detail.stats?.minNet ?? detail.lowPrice,
+        best_store: detail.picks?.cheapestNet?.store || "",
+        verdict_score: detail.verdict?.score ?? null,
+        verdict_label: detail.verdict?.label || "",
+        fake_discount_status: detail.fakeDiscount?.status || "",
+        fake_discount_label: detail.fakeDiscount?.label || "",
+        offer_count: detail.totalOfferCount,
+      });
+      results.push({ id: item.id, ok: true });
+    } catch (err) {
+      results.push({ id: item.id, ok: false, error: err.message });
+    }
+  }
+  const items = getWatchlist();
+  let pushSummary = { alerts: [], pushSentCount: 0 };
+  try {
+    pushSummary = await notifyWatchlistPriceDrops(before, items);
+  } catch {
+    // Non-fatal push error
+  }
+  return {
+    refreshed: results,
+    items,
+    budget: summarizeWatchlistBudget(items),
+    pushSentCount: pushSummary.pushSentCount,
+    alertsTriggered: pushSummary.alerts.length,
+  };
+}
+
+// Live batch refresh of all watched items (with automatic API key forwarding, re-hydration & iOS Push alerts)
 app.post("/api/watchlist/refresh", async (req, res) => {
   try {
     const keys = extractReqKeys(req);
-    const current = getWatchlist();
-    const results = [];
-    for (const item of current) {
-      try {
-        const detail = await getProductDetail(item.url, {
-          refresh: true,
-          fallbackQuery: item.title,
-          ...keys,
-        });
-        upsertWatchlistItem({
-          id: item.id,
-          title: detail.title,
-          url: item.url,
-          image: detail.image,
-          folder: item.folder,
-          target_price: item.target_price,
-          last_net_price: detail.stats?.minNet ?? detail.lowPrice,
-          best_store: detail.picks?.cheapestNet?.store || "",
-          verdict_score: detail.verdict?.score ?? null,
-          verdict_label: detail.verdict?.label || "",
-          fake_discount_status: detail.fakeDiscount?.status || "",
-          fake_discount_label: detail.fakeDiscount?.label || "",
-          offer_count: detail.totalOfferCount,
-        });
-        results.push({ id: item.id, ok: true });
-      } catch (err) {
-        results.push({ id: item.id, ok: false, error: err.message });
-      }
-    }
-    const items = getWatchlist();
-    res.json({
-      refreshed: results,
-      items,
-      budget: summarizeWatchlistBudget(items),
-    });
+    const out = await refreshAllWatchlistAndNotify(keys);
+    res.json(out);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// iOS 16.4+ & DESKTOP WEB PUSH NOTIFICATIONS (NO TELEGRAM REQUIRED)
+// ============================================================================
+app.get("/api/push/config", (_req, res) => {
+  try {
+    res.json(getPushConfig());
+  } catch (err) {
+    res.status(500).json({ supported: false, error: err.message });
+  }
+});
+
+app.post("/api/push/subscribe", (req, res) => {
+  try {
+    const sub = req.body?.subscription || req.body;
+    if (!isValidPushEndpoint(sub?.endpoint)) {
+      return res.status(400).json({ error: "Geçersiz bildirim servisi bağlantısı." });
+    }
+    savePushSubscription(sub, req.headers["user-agent"] || "");
+    res.status(201).json({
+      ok: true,
+      subscriberCount: getPushSubscriptions().length,
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message || "Bildirim aboneliği kaydedilemedi." });
+  }
+});
+
+app.post("/api/push/unsubscribe", (req, res) => {
+  const endpoint = String(req.body?.endpoint || "").trim();
+  if (!endpoint) {
+    return res.status(400).json({ error: "Abonelik adresi gereklidir." });
+  }
+  removePushSubscription(endpoint);
+  res.json({ ok: true, subscriberCount: getPushSubscriptions().length });
+});
+
+app.post("/api/push/test", async (req, res) => {
+  try {
+    const payload = {
+      title: "🔔 FiyatRadar Bildirimleri Aktif!",
+      body: "Takip listenizdeki bir ürün hedef fiyata indiğinde veya %10+ düştüğünde kilit ekranınıza anında haber vereceğiz.",
+      url: "/?view=watchlist",
+      tag: `fr-test-${Date.now()}`,
+    };
+
+    const singleSub = req.body?.subscription;
+    if (singleSub?.endpoint && singleSub?.keys?.p256dh && singleSub?.keys?.auth) {
+      if (!isValidPushEndpoint(singleSub.endpoint)) {
+        return res.status(400).json({ error: "Geçersiz abonelik adresi." });
+      }
+      savePushSubscription(singleSub, req.headers["user-agent"] || "");
+      const r = await sendPushToSubscription(singleSub, payload);
+      if (!r.ok) {
+        return res.status(502).json({ ok: false, error: r.error || "Test bildirimi gönderilemedi." });
+      }
+      return res.json({ ok: true, sent: 1 });
+    }
+
+    const r = await broadcastPush(payload);
+    if (r.sent === 0) {
+      return res.status(400).json({ ok: false, error: "Kayıtlı aktif bildirim aboneliği bulunamadı." });
+    }
+    res.json({ ok: true, ...r });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Cron / Background Watchlist Check & Lock-Screen Push Trigger
+app.post("/api/push/check-watchlist", async (req, res) => {
+  const secret = String(process.env.CRON_SECRET || "").trim();
+  if (secret) {
+    const provided = String(req.headers["x-cron-secret"] || req.query.secret || "").trim();
+    if (provided !== secret) {
+      return res.status(401).json({ error: "Yetkisiz istek." });
+    }
+  }
+  try {
+    const keys = extractReqKeys(req);
+    const out = await refreshAllWatchlistAndNotify(keys);
+    res.json({
+      ok: true,
+      checked: out.refreshed.length,
+      alertsTriggered: out.alertsTriggered,
+      pushSentCount: out.pushSentCount,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// APPLE SHORTCUTS & iOS SHARE SHEET INTEGRATION
+// ============================================================================
+
+/**
+ * Extracts a clean product URL or search query from iOS Share Sheet / Apple Shortcuts params.
+ * Handles Trendyol/Hepsiburada/Amazon share messages like "iPhone 17 Pro https://ty.gl/abc123".
+ */
+export function extractSharedQuery(params = {}) {
+  const candidates = [params.url, params.text, params.q, params.title]
+    .map((v) => String(v || "").trim())
+    .filter(Boolean);
+
+  for (const c of candidates) {
+    const urlMatch = c.match(/https?:\/\/[^\s"'<>]+/i);
+    if (urlMatch) {
+      return urlMatch[0].replace(/[),.;!?]+$/, "");
+    }
+  }
+
+  return (candidates[0] || "").replace(/\s+/g, " ").trim().slice(0, 220);
+}
+
+app.get("/share", (req, res) => {
+  const shared = extractSharedQuery(req.query);
+  if (!shared) {
+    return res.redirect(302, "/");
+  }
+  return res.redirect(302, `/?q=${encodeURIComponent(shared)}&from=shortcut`);
+});
+
+// Lightweight JSON endpoint for Apple Shortcuts ("URL İçeriğini Al" / instant banner)
+app.get("/api/shortcut-search", async (req, res) => {
+  try {
+    const q = extractSharedQuery(req.query);
+    if (!q) {
+      return res.status(400).json({ ok: false, error: "Ürün adı veya mağaza bağlantısı gereklidir." });
+    }
+    const keys = extractReqKeys(req);
+    const result = await searchProducts(q, { page: 1, ...keys });
+    const priced = (result.products || []).filter(
+      (p) => !p.isAccessory && typeof p.lowestPrice === "number" && p.lowestPrice > 0 && p.badge !== "Tüm Mağazalar"
+    );
+    priced.sort((a, b) => a.lowestPrice - b.lowestPrice);
+    const best = priced[0] || result.products?.[0] || null;
+    const displayQuery = result.resolvedFromLink?.resolvedQuery || result.query || q;
+
+    const summaryText = best?.lowestPrice
+      ? `${displayQuery}: En ucuz ${formatTrNumber(best.lowestPrice)} TL (${best.source || best.badge || "Mağaza"}) — toplam ${result.totalFound} sonuç.`
+      : `${displayQuery} için ${result.totalFound} sonuç bulundu.`;
+
+    res.json({
+      ok: true,
+      query: displayQuery,
+      resolvedStore: result.resolvedFromLink?.sourceStore || null,
+      cheapestPrice: best?.lowestPrice ?? null,
+      cheapestStore: best?.source || best?.badge || null,
+      cheapestTitle: best?.title || null,
+      cheapestUrl: best?.externalUrl || null,
+      totalFound: result.totalFound,
+      summaryText,
+      appUrl: `/?q=${encodeURIComponent(displayQuery)}&from=shortcut`,
+    });
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err.message || "Kestirme araması başarısız." });
   }
 });
 

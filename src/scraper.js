@@ -665,8 +665,8 @@ export async function getProductDetail(rawUrl, options = {}) {
   const cheapestBase = offers.length ? Math.min(...offers.map((o) => o.basePrice)) : null;
   const unitInfo = extractUnitInfo(title, cheapestBase);
 
-  // 5. Run offer statistical analysis & deal scoring
-  const offerAnalysis = analyzeOffers(offers, unitInfo);
+  // 5. Run offer statistical analysis, deal scoring & authenticity/warranty trust shield
+  const offerAnalysis = analyzeOffers(offers, unitInfo, { productTitle: title, category });
 
   // Update unitInfo with best net price
   const finalUnitInfo = unitInfo
@@ -770,6 +770,7 @@ export async function getProductDetail(rawUrl, options = {}) {
     picks: offerAnalysis.picks,
     shippingTraps: offerAnalysis.shippingTraps,
     platformBreakdown: offerAnalysis.platformBreakdown,
+    trustSummary: offerAnalysis.trustSummary,
     offers: offerAnalysis.offers,
     history: historyAnalysis.points,
     historySummary: historyAnalysis.summary,

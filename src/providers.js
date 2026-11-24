@@ -1327,7 +1327,7 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
           : pricedOffers;
 
   const unitInfoGlobal = extractUnitInfo(query, analysisPool[0]?.basePrice ?? null);
-  const analysis = analyzeOffers(analysisPool, unitInfoGlobal);
+  const analysis = analyzeOffers(analysisPool, unitInfoGlobal, { productTitle: query });
   const histAnalysis = analyzePriceHistory([], analysis.stats?.minNet ?? null, null, analysis.stats);
 
   const aggregateKey = `virtual:${prefix}:all:${encodeURIComponent(query.toLocaleLowerCase("tr-TR"))}`;
@@ -1368,6 +1368,7 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
     picks: analysis.picks,
     shippingTraps: analysis.shippingTraps,
     platformBreakdown: analysis.platformBreakdown,
+    trustSummary: analysis.trustSummary,
     offers: analysis.offers,
     history: [],
     historySummary: null,
@@ -1472,7 +1473,7 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
     }
 
     const uInfo = extractUnitInfo(p.title, p.lowestPrice);
-    const itemAnalysis = analyzeOffers(dedup, uInfo);
+    const itemAnalysis = analyzeOffers(dedup, uInfo, { productTitle: p.title });
 
     // Other products/colors from this search become navigable internal variants (with their own images & prices!)
     const peerVariants = products
@@ -1527,6 +1528,7 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
       picks: itemAnalysis.picks,
       shippingTraps: itemAnalysis.shippingTraps,
       platformBreakdown: itemAnalysis.platformBreakdown,
+      trustSummary: itemAnalysis.trustSummary,
       offers: itemAnalysis.offers,
       verdict: itemVerdict,
       variants: [...peerVariants, ...extraStoreVariants.slice(0, 4)],
@@ -2078,7 +2080,7 @@ async function fetchMarketFiyati(query) {
     const vKey = `virtual:mf:${item.id}`;
     const minPrice = Math.min(...chainOffers.map((o) => o.basePrice));
     const unitInfo = extractUnitInfo(item.title, minPrice);
-    const analysis = analyzeOffers(chainOffers, unitInfo);
+    const analysis = analyzeOffers(chainOffers, unitInfo, { productTitle: item.title, category: "Market" });
     const histAnalysis = analyzePriceHistory([], analysis.stats?.minNet ?? minPrice);
 
     saveVirtualDetail(vKey, {
@@ -2101,6 +2103,7 @@ async function fetchMarketFiyati(query) {
       picks: analysis.picks,
       shippingTraps: analysis.shippingTraps,
       platformBreakdown: analysis.platformBreakdown,
+      trustSummary: analysis.trustSummary,
       offers: analysis.offers,
       history: [],
       historySummary: null,
@@ -2187,7 +2190,7 @@ async function fetchMigros(query, vertical = "elektronik") {
     };
 
     const unitInfo = extractUnitInfo(title, price);
-    const analysis = analyzeOffers([offer], unitInfo);
+    const analysis = analyzeOffers([offer], unitInfo, { productTitle: title, category: platformLabel });
     const histAnalysis = analyzePriceHistory([], price, null, {
       medianNet: analysis.stats?.medianNet ?? price,
       listPrice: regularPrice && regularPrice > price ? regularPrice : null,
@@ -2213,6 +2216,7 @@ async function fetchMigros(query, vertical = "elektronik") {
       picks: analysis.picks,
       shippingTraps: [],
       platformBreakdown: analysis.platformBreakdown,
+      trustSummary: analysis.trustSummary,
       offers: analysis.offers,
       history: [],
       historySummary: null,

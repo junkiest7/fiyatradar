@@ -3752,6 +3752,271 @@ html[data-theme="dark"] .fake-discount-panel.good {
   }
 }
 
+/* ==========================================================================
+   v9 Features: iPhone Web Push Alerts, Authenticity/Warranty Shield, Shortcuts
+   ========================================================================== */
+
+/* Native iOS 16.4+ Lock-Screen Push Notification Card (Watchlist) */
+.push-alert-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 13px 16px;
+  margin-bottom: 14px;
+  box-shadow: var(--shadow-sm);
+}
+
+.push-alert-card.active {
+  border-color: var(--good-border);
+  background: var(--good-soft);
+}
+
+.push-alert-card.ios-guide {
+  border-color: var(--warn-border);
+  background: var(--warn-soft);
+}
+
+.push-alert-copy {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  flex: 1;
+  min-width: 220px;
+}
+
+.push-alert-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  font-size: 1rem;
+}
+
+.push-alert-card.active .push-alert-icon {
+  background: var(--good);
+  color: #fff;
+}
+
+.push-alert-title {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--ink);
+  margin: 0 0 2px;
+}
+
+.push-alert-desc {
+  font-size: 0.8rem;
+  color: var(--ink-secondary);
+  margin: 0;
+}
+
+.push-alert-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Authenticity, Official TR Warranty vs Importer Warranty & Seller Trust Shield */
+.trust-shield-panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px 20px;
+  margin-bottom: 20px;
+  box-shadow: var(--shadow-sm);
+}
+
+.trust-shield-panel.caution {
+  border-color: var(--warn-border);
+  background: linear-gradient(180deg, var(--warn-soft) 0%, var(--bg-surface) 58%);
+}
+
+.trust-shield-panel.verified {
+  border-color: var(--good-border);
+  background: linear-gradient(180deg, var(--good-soft) 0%, var(--bg-surface) 58%);
+}
+
+.trust-shield-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.trust-shield-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.96rem;
+  font-weight: 800;
+  color: var(--ink);
+  margin: 0;
+}
+
+.trust-shield-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.trust-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 700;
+  background: var(--bg-subtle);
+  color: var(--ink-secondary);
+}
+
+.trust-pill.good {
+  background: var(--good-soft);
+  color: var(--good);
+  border: 1px solid var(--good-border);
+}
+
+.trust-pill.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+  border: 1px solid var(--warn-border);
+}
+
+.trust-pill.bad {
+  background: var(--bad-soft);
+  color: var(--bad);
+  border: 1px solid var(--bad-border);
+}
+
+.trust-shield-note {
+  margin: 0 0 10px;
+  font-size: 0.85rem;
+  color: var(--ink-secondary);
+}
+
+.trust-shield-best-auth {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  font-size: 0.83rem;
+}
+
+.mini-badge.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+  border: 1px solid var(--warn-border);
+}
+
+/* Apple Shortcuts & Haptic Touch Setup Modal */
+.shortcuts-sheet {
+  width: min(540px, 100%);
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.shortcut-section {
+  background: var(--bg-page);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 15px;
+  margin-bottom: 12px;
+}
+
+.shortcut-section h4 {
+  margin: 0 0 6px;
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.shortcut-steps {
+  margin: 8px 0 10px;
+  padding-left: 18px;
+  font-size: 0.83rem;
+  color: var(--ink-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.shortcut-copy-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px 6px 10px;
+}
+
+.shortcut-copy-code {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shortcut-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.shortcut-action-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shortcut-action-card strong {
+  font-size: 0.84rem;
+  color: var(--ink);
+}
+
+.shortcut-action-card span {
+  font-size: 0.74rem;
+  color: var(--ink-muted);
+}
+
+.shortcut-action-btns {
+  display: flex;
+  gap: 6px;
+  margin-top: auto;
+}
+
+@media (max-width: 520px) {
+  .shortcut-actions-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Print Report Mode */
 @media print {
   .topbar,
