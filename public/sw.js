@@ -1,10 +1,10 @@
 /**
- * FiyatRadar Service Worker (v13)
+ * FiyatRadar Service Worker (v14)
  * Network-first for app shell so iPhone PWA always gets instant updates,
  * with cache fallback when offline, plus native iOS 16.4+ Web Push notifications.
  */
 
-const CACHE_NAME = "fiyatradar-v13";
+const CACHE_NAME = "fiyatradar-v14";
 const SHELL_ASSETS = [
   "/",
   "/index.html",

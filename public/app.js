@@ -32,7 +32,56 @@ const DEFAULT_WATCHLIST_FOLDERS = [
   "Diğer",
 ];
 
+const DEFAULT_USER_PREFS = {
+  themeMode: "system", // "system" | "light" | "dark"
+  defaultSort: "relevance", // "relevance" | "price_asc" | "unit_asc" | "offers_desc"
+  autoHideAccessories: true,
+  autoHideImporterRefurb: false,
+  defaultAuthorizedOnly: false,
+  defaultFreeShippingOnly: false,
+  installmentMonths: 3,
+  installmentRate: 0,
+};
+
+function loadUserPrefs() {
+  try {
+    const raw = JSON.parse(localStorage.getItem("fiyatradar_prefs") || "{}");
+    const savedTheme = localStorage.getItem("fiyatradar_theme");
+    const themeMode =
+      raw.themeMode === "light" || raw.themeMode === "dark" || raw.themeMode === "system"
+        ? raw.themeMode
+        : savedTheme === "light" || savedTheme === "dark"
+          ? savedTheme
+          : "system";
+    return {
+      ...DEFAULT_USER_PREFS,
+      ...raw,
+      themeMode,
+      installmentMonths: [1, 3, 6, 9, 12].includes(Number(raw.installmentMonths))
+        ? Number(raw.installmentMonths)
+        : DEFAULT_USER_PREFS.installmentMonths,
+      installmentRate: [0, 2.5, 3.5, 4.5].includes(Number(raw.installmentRate))
+        ? Number(raw.installmentRate)
+        : DEFAULT_USER_PREFS.installmentRate,
+    };
+  } catch {
+    return { ...DEFAULT_USER_PREFS };
+  }
+}
+
+function saveUserPrefs(nextPrefs) {
+  state.prefs = { ...state.prefs, ...nextPrefs };
+  try {
+    localStorage.setItem("fiyatradar_prefs", JSON.stringify(state.prefs));
+  } catch {
+    // Ignore quota errors
+  }
+}
+
+const initialPrefs = loadUserPrefs();
+
 const state = {
+  prefs: initialPrefs,
   activeView: "search", // 'search' | 'detail' | 'compare' | 'cart' | 'watchlist' | 'history'
   lastQuery: "",
   searchData: null,
@@ -41,11 +90,11 @@ const state = {
   secondHandLoading: false,
   secondHandError: "",
   searchFilters: {
-    hideAccessories: true,
+    hideAccessories: Boolean(initialPrefs.autoHideAccessories),
     hideListings: true,
     pricedOnly: false,
-    officialOnly: false,
-    freeShippingOnly: false,
+    officialOnly: Boolean(initialPrefs.defaultAuthorizedOnly),
+    freeShippingOnly: Boolean(initialPrefs.defaultFreeShippingOnly),
     store: "",
     variantAttr: null, // { group: 'capacity'|'color'|'size'|'volume', value: string }
   },
@@ -61,17 +110,17 @@ const state = {
   currentDetail: null,
   chartRange: "all",
   installment: {
-    months: 3,
-    monthlyRate: 0,
+    months: initialPrefs.installmentMonths,
+    monthlyRate: initialPrefs.installmentRate,
   },
   offerSort: "net_asc",
   offerFilters: {
-    freeShippingOnly: false,
+    freeShippingOnly: Boolean(initialPrefs.defaultFreeShippingOnly),
     inStockOnly: false,
     hideOutliers: false,
     hideSuspicious: false,
-    authorizedOnly: false,
-    hideImporterAndRefurb: false,
+    authorizedOnly: Boolean(initialPrefs.defaultAuthorizedOnly),
+    hideImporterAndRefurb: Boolean(initialPrefs.autoHideImporterRefurb),
     storeSearch: "",
   },
   compareBasket: loadLocalCompare(), // [{ id, title, url, image, lowestPrice }]
@@ -141,11 +190,22 @@ const els = {
   openSettingsBtn: $("openSettingsBtn"),
   closeSettingsBtn: $("closeSettingsBtn"),
   settingsModal: $("settingsModal"),
-  settingsForm: $("settingsForm"),
-  serperKeyInput: $("serperKeyInput"),
-  serpApiKeyInput: $("serpApiKeyInput"),
-  clearApiKeysBtn: $("clearApiKeysBtn"),
-  apiReadyDot: $("apiReadyDot"),
+  settingsThemeSegmented: $("settingsThemeSegmented"),
+  prefDefaultSort: $("prefDefaultSort"),
+  prefHideAccessories: $("prefHideAccessories"),
+  prefHideImporterRefurb: $("prefHideImporterRefurb"),
+  prefAuthorizedOnly: $("prefAuthorizedOnly"),
+  prefFreeShippingOnly: $("prefFreeShippingOnly"),
+  prefInstallmentMonths: $("prefInstallmentMonths"),
+  prefInstallmentRate: $("prefInstallmentRate"),
+  settingsPushBox: $("settingsPushBox"),
+  exportBackupBtn: $("exportBackupBtn"),
+  importBackupBtn: $("importBackupBtn"),
+  importBackupInput: $("importBackupInput"),
+  settingsClearHistoryBtn: $("settingsClearHistoryBtn"),
+  refreshAppCacheBtn: $("refreshAppCacheBtn"),
+  resetAllDataBtn: $("resetAllDataBtn"),
+  settingsLiveStatus: $("settingsLiveStatus"),
   scannerModal: $("scannerModal"),
   closeScannerBtn: $("closeScannerBtn"),
   scannerVideo: $("scannerVideo"),
@@ -631,32 +691,9 @@ function switchView(view) {
   if (view === "history") loadHistory();
 }
 
-// API Key storage helpers (stored locally on user's iPhone/browser)
-function getStoredApiKeys() {
-  try {
-    return {
-      serperKey: (localStorage.getItem("fiyatradar_serper_key") || "").trim(),
-      serpApiKey: (localStorage.getItem("fiyatradar_serpapi_key") || "").trim(),
-    };
-  } catch {
-    return { serperKey: "", serpApiKey: "" };
-  }
-}
-
-function updateApiStatusDot(serverReady = false) {
-  const { serperKey, serpApiKey } = getStoredApiKeys();
-  if (els.apiReadyDot) {
-    els.apiReadyDot.hidden = !(serverReady || serperKey || serpApiKey);
-  }
-}
-
 // API Fetch Helper
 async function apiFetch(url, options = {}) {
-  const { serperKey, serpApiKey } = getStoredApiKeys();
   const headers = new Headers(options.headers || {});
-  if (serperKey) headers.set("X-Serper-Key", serperKey);
-  if (serpApiKey) headers.set("X-SerpApi-Key", serpApiKey);
-
   const res = await fetch(url, { ...options, headers });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -721,7 +758,7 @@ async function performSearch(query, opts = {}) {
   els.searchInput.value = q;
   els.clearSearchBtn.hidden = false;
 
-  const sort = opts.sort || els.searchSortSelect.value || "relevance";
+  const sort = opts.sort || els.searchSortSelect.value || state.prefs.defaultSort || "relevance";
 
   const params = new URLSearchParams({ q, sort });
   if (opts.refresh) params.set("refresh", "1");
@@ -750,7 +787,7 @@ async function performSearch(query, opts = {}) {
     state.secondHandData = null;
     state.secondHandLoading = false;
     state.secondHandError = "";
-    // Reset per-search quick filters cleanly; auto-hide accessories and category/listing pages whenever direct products exist
+    // Reset per-search quick filters cleanly using user's saved Settings preferences
     const allProds = data.products || [];
     const hasRetail = allProds.some((p) => !p.isSecondHand);
     const retailProds = hasRetail ? allProds.filter((p) => !p.isSecondHand) : allProds;
@@ -760,12 +797,14 @@ async function performSearch(query, opts = {}) {
     const directProductCount = retailProds.filter(
       (p) => !p.isListingPage && p.badge !== "Tüm Mağazalar"
     ).length;
+    const hasOfficial = retailProds.some((p) => p.isOfficialStore);
+    const hasFreeShip = retailProds.some((p) => p.isFreeShipping);
     state.searchFilters = {
-      hideAccessories: hasAccessories && hasPrimary,
+      hideAccessories: Boolean(state.prefs.autoHideAccessories && hasAccessories && hasPrimary),
       hideListings: hasListings && directProductCount >= 1,
       pricedOnly: false,
-      officialOnly: false,
-      freeShippingOnly: false,
+      officialOnly: Boolean(state.prefs.defaultAuthorizedOnly && hasOfficial),
+      freeShippingOnly: Boolean(state.prefs.defaultFreeShippingOnly && hasFreeShip),
       store: "",
       variantAttr: null,
     };
@@ -1442,13 +1481,23 @@ async function openProductDetail(url, refresh = false, fallbackTitle = "") {
     state.currentDetail = mergePersonalPriceHistory(detail);
     state.chartRange = "all";
     state.offerSort = "net_asc";
+    state.installment = {
+      months: state.prefs.installmentMonths,
+      monthlyRate: state.prefs.installmentRate,
+    };
+    const offersList = detail.offers || [];
+    const hasFreeShipOffer = offersList.some((o) => o.shipping?.isFree || o.shippingCost === 0);
+    const hasAuthOffer = offersList.some((o) => o.trustShield?.isAuthorized);
+    const hasCleanNonImp = offersList.some(
+      (o) => o.trustShield?.warranty !== "importer" && o.trustShield?.condition === "new"
+    );
     state.offerFilters = {
-      freeShippingOnly: false,
+      freeShippingOnly: Boolean(state.prefs.defaultFreeShippingOnly && hasFreeShipOffer),
       inStockOnly: false,
       hideOutliers: false,
       hideSuspicious: Boolean(detail.stats?.suspiciousLowCount > 0),
-      authorizedOnly: false,
-      hideImporterAndRefurb: false,
+      authorizedOnly: Boolean(state.prefs.defaultAuthorizedOnly && hasAuthOffer),
+      hideImporterAndRefurb: Boolean(state.prefs.autoHideImporterRefurb && hasCleanNonImp),
       storeSearch: "",
     };
 
@@ -3618,15 +3667,10 @@ function bindEvents() {
     if (!d) return;
     showToast("CSV (Excel uyumlu) raporu hazırlanıyor...");
     try {
-      const { serperKey, serpApiKey } = getStoredApiKeys();
-      const headers = new Headers();
-      if (serperKey) headers.set("X-Serper-Key", serperKey);
-      if (serpApiKey) headers.set("X-SerpApi-Key", serpApiKey);
-
       const params = new URLSearchParams({ url: d.url });
       if (d.title) params.set("title", d.title);
 
-      const res = await fetch(`/api/export/csv?${params.toString()}`, { headers });
+      const res = await fetch(`/api/export/csv?${params.toString()}`);
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.error || `CSV oluşturulamadı (HTTP ${res.status})`);
@@ -3948,70 +3992,110 @@ function bindEvents() {
     }
   });
 
-  els.settingsForm?.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const serper = (els.serperKeyInput?.value || "").trim();
-    const serpApi = (els.serpApiKeyInput?.value || "").trim();
-    try {
-      if (serper) localStorage.setItem("fiyatradar_serper_key", serper);
-      else localStorage.removeItem("fiyatradar_serper_key");
-      if (serpApi) localStorage.setItem("fiyatradar_serpapi_key", serpApi);
-      else localStorage.removeItem("fiyatradar_serpapi_key");
-    } catch {
-      // Ignore
-    }
-    updateApiStatusDot();
-    closeSettingsModal();
-    showToast(serper || serpApi ? "Google Türkiye (70+ Mağaza) aktif edildi!" : "API anahtarları temizlendi.");
-    if (state.lastQuery) performSearch(state.lastQuery, { refresh: true });
+  // Consumer Settings Modal Controls (instant save & live apply)
+  els.settingsThemeSegmented?.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-theme-pref]");
+    if (!btn) return;
+    const pref = btn.dataset.themePref;
+    setThemePreference(pref);
+    syncSettingsModalUI();
+    const label = pref === "dark" ? "Karanlık (OLED)" : pref === "light" ? "Aydınlık" : "Sistem (Otomatik)";
+    showToast(`Tema: ${label}`);
   });
 
-  $("testApiKeyBtn")?.addEventListener("click", async () => {
-    const key = (els.serperKeyInput?.value || "").trim();
-    const statusEl = $("settingsTestStatus");
-    if (!statusEl) return;
-    statusEl.hidden = false;
-    statusEl.style.color = "var(--ink-secondary)";
-    statusEl.textContent = "Serper bağlantısı test ediliyor...";
+  els.prefDefaultSort?.addEventListener("change", () => {
+    const val = els.prefDefaultSort.value || "relevance";
+    saveUserPrefs({ defaultSort: val });
+    if (els.searchSortSelect) els.searchSortSelect.value = val;
+    showToast("Varsayılan sıralama güncellendi.");
+    if (state.lastQuery && state.activeView === "search") performSearch(state.lastQuery, { sort: val });
+  });
+
+  els.prefHideAccessories?.addEventListener("change", () => {
+    const val = Boolean(els.prefHideAccessories.checked);
+    saveUserPrefs({ autoHideAccessories: val });
+    state.searchFilters.hideAccessories = val;
+    if (state.searchData && state.activeView === "search") renderSearchResults();
+    showToast(val ? "Aksesuarlar otomatik gizlenecek." : "Aksesuarlar da listelenecek.");
+  });
+
+  els.prefHideImporterRefurb?.addEventListener("change", () => {
+    const val = Boolean(els.prefHideImporterRefurb.checked);
+    saveUserPrefs({ autoHideImporterRefurb: val });
+    state.offerFilters.hideImporterAndRefurb = val;
+    if (state.currentDetail && state.activeView === "detail") renderOffersTableBody();
+    showToast(val ? "İthalatçı ve yenilenmiş ilanlar otomatik gizlenecek." : "Tüm garanti/durum türleri gösterilecek.");
+  });
+
+  els.prefAuthorizedOnly?.addEventListener("change", () => {
+    const val = Boolean(els.prefAuthorizedOnly.checked);
+    saveUserPrefs({ defaultAuthorizedOnly: val });
+    state.searchFilters.officialOnly = val;
+    state.offerFilters.authorizedOnly = val;
+    if (state.searchData && state.activeView === "search") renderSearchResults();
+    if (state.currentDetail && state.activeView === "detail") renderOffersTableBody();
+    showToast(val ? "Yetkili satıcı önceliği açıldı." : "Tüm satıcılar gösterilecek.");
+  });
+
+  els.prefFreeShippingOnly?.addEventListener("change", () => {
+    const val = Boolean(els.prefFreeShippingOnly.checked);
+    saveUserPrefs({ defaultFreeShippingOnly: val });
+    state.searchFilters.freeShippingOnly = val;
+    state.offerFilters.freeShippingOnly = val;
+    if (state.searchData && state.activeView === "search") renderSearchResults();
+    if (state.currentDetail && state.activeView === "detail") renderOffersTableBody();
+    showToast(val ? "Ücretsiz kargo filtresi varsayılan yapıldı." : "Ücretsiz kargo zorunluluğu kaldırıldı.");
+  });
+
+  els.prefInstallmentMonths?.addEventListener("change", () => {
+    const months = Number.parseInt(els.prefInstallmentMonths.value, 10) || 3;
+    saveUserPrefs({ installmentMonths: months });
+    state.installment.months = months;
+    if (state.currentDetail && state.activeView === "detail") renderDetailView();
+    showToast(months === 1 ? "Varsayılan ödeme: Peşin" : `Varsayılan taksit: ${months} Ay`);
+  });
+
+  els.prefInstallmentRate?.addEventListener("change", () => {
+    const rate = Number.parseFloat(els.prefInstallmentRate.value) || 0;
+    saveUserPrefs({ installmentRate: rate });
+    state.installment.monthlyRate = rate;
+    if (state.currentDetail && state.activeView === "detail") renderDetailView();
+    showToast(`Varsayılan vade oranı: %${rate}`);
+  });
+
+  els.exportBackupBtn?.addEventListener("click", exportAppBackupJson);
+  els.importBackupBtn?.addEventListener("click", () => els.importBackupInput?.click());
+  els.importBackupInput?.addEventListener("change", (e) => {
+    const file = e.target.files?.[0];
+    if (file) importAppBackupJson(file);
+    e.target.value = "";
+  });
+
+  els.settingsClearHistoryBtn?.addEventListener("click", async () => {
     try {
-      const res = await fetch("/api/providers/test", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ serperKey: key }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.ok) throw new Error(data.error || "Doğrulama başarısız");
-      statusEl.style.color = "var(--good)";
-      statusEl.textContent = `✓ Bağlantı başarılı! Google Türkiye araması çalışıyor (${data.sampleCount} test sonucu alındı). Şimdi "Kaydet ve Aktifleştir"e dokunun.`;
+      await apiFetch("/api/history", { method: "DELETE" });
+      state.history = [];
+      if (state.activeView === "history") renderHistory();
+      showToast("Arama geçmişi temizlendi.");
     } catch (err) {
-      statusEl.style.color = "var(--bad)";
-      statusEl.textContent = `✗ ${err.message}`;
+      showToast(err.message || "Geçmiş temizlenemedi.");
     }
   });
 
-  els.clearApiKeysBtn?.addEventListener("click", () => {
-    if (els.serperKeyInput) els.serperKeyInput.value = "";
-    if (els.serpApiKeyInput) els.serpApiKeyInput.value = "";
-    const statusEl = $("settingsTestStatus");
-    if (statusEl) {
-      statusEl.hidden = true;
-      statusEl.textContent = "";
-    }
-    try {
-      localStorage.removeItem("fiyatradar_serper_key");
-      localStorage.removeItem("fiyatradar_serpapi_key");
-    } catch {
-      // Ignore
-    }
-    updateApiStatusDot();
-    showToast("Kayıtlı API anahtarları temizlendi.");
-  });
+  els.refreshAppCacheBtn?.addEventListener("click", refreshAppCacheAndReload);
+  els.resetAllDataBtn?.addEventListener("click", resetAllLocalAppData);
 }
 
 // ============================================================================
 // OLED DARK MODE, VOICE SEARCH, PHOTO OCR & PNG SHARE CARD CONTROLLERS
 // ============================================================================
-function applyTheme(mode, persist = false) {
+function resolveEffectiveTheme(prefMode) {
+  if (prefMode === "dark" || prefMode === "light") return prefMode;
+  const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  return prefersDark ? "dark" : "light";
+}
+
+function applyTheme(mode) {
   const isDark = mode === "dark";
   document.documentElement.dataset.theme = isDark ? "dark" : "light";
   if (els.themeColorMeta) {
@@ -4019,39 +4103,43 @@ function applyTheme(mode, persist = false) {
   }
   if (els.themeIconMoon) els.themeIconMoon.hidden = isDark;
   if (els.themeIconSun) els.themeIconSun.hidden = !isDark;
-  if (persist) {
-    try {
-      localStorage.setItem("fiyatradar_theme", isDark ? "dark" : "light");
-    } catch {
-      // Ignore
-    }
-  }
   // Re-render SVG chart so gridlines & axis labels adapt immediately
   if (state.activeView === "detail" && state.currentDetail && $("priceChartMount")) {
     renderPriceChart($("priceChartMount"), state.currentDetail.history, state.chartRange);
   }
 }
 
+function setThemePreference(prefMode) {
+  const clean = prefMode === "dark" || prefMode === "light" ? prefMode : "system";
+  saveUserPrefs({ themeMode: clean });
+  try {
+    if (clean === "system") localStorage.removeItem("fiyatradar_theme");
+    else localStorage.setItem("fiyatradar_theme", clean);
+  } catch {
+    // Ignore
+  }
+  applyTheme(resolveEffectiveTheme(clean));
+}
+
 function toggleTheme() {
   const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
   const next = current === "dark" ? "light" : "dark";
-  applyTheme(next, true);
+  setThemePreference(next);
+  syncSettingsModalUI();
   showToast(next === "dark" ? "Karanlık Mod (OLED) açıldı." : "Aydınlık Mod açıldı.");
 }
 
 function initTheme() {
-  const current = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
-  applyTheme(current, false);
-  // Follow iOS system theme live if user has not manually locked a theme
+  applyTheme(resolveEffectiveTheme(state.prefs.themeMode));
+  if (els.searchSortSelect && state.prefs.defaultSort) {
+    els.searchSortSelect.value = state.prefs.defaultSort;
+  }
+  // Follow iOS system theme live whenever themeMode is "system"
   if (window.matchMedia) {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     mq.addEventListener?.("change", (e) => {
-      try {
-        if (!localStorage.getItem("fiyatradar_theme")) {
-          applyTheme(e.matches ? "dark" : "light", false);
-        }
-      } catch {
-        // Ignore
+      if (state.prefs.themeMode === "system") {
+        applyTheme(e.matches ? "dark" : "light");
       }
     });
   }
@@ -4295,14 +4383,266 @@ async function initPushClient() {
   }
 }
 
+function syncSettingsModalUI() {
+  const p = state.prefs;
+  els.settingsThemeSegmented?.querySelectorAll("[data-theme-pref]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.themePref === p.themeMode);
+  });
+  if (els.prefDefaultSort) els.prefDefaultSort.value = p.defaultSort || "relevance";
+  if (els.prefHideAccessories) els.prefHideAccessories.checked = Boolean(p.autoHideAccessories);
+  if (els.prefHideImporterRefurb) els.prefHideImporterRefurb.checked = Boolean(p.autoHideImporterRefurb);
+  if (els.prefAuthorizedOnly) els.prefAuthorizedOnly.checked = Boolean(p.defaultAuthorizedOnly);
+  if (els.prefFreeShippingOnly) els.prefFreeShippingOnly.checked = Boolean(p.defaultFreeShippingOnly);
+  if (els.prefInstallmentMonths) els.prefInstallmentMonths.value = String(p.installmentMonths);
+  if (els.prefInstallmentRate) els.prefInstallmentRate.value = String(p.installmentRate);
+}
+
+async function renderSettingsPushBox() {
+  const box = els.settingsPushBox;
+  if (!box) return;
+  const env = getPushEnvironment();
+
+  if (env.needsIosHomeScreen) {
+    box.innerHTML = `
+      <div class="settings-push-status">
+        <span class="status-dot warn"></span>
+        <span>Ana Ekrana Ekle Gerekli</span>
+      </div>
+      <p class="muted-text" style="margin:0;font-size:0.78rem;">
+        iPhone kilit ekranı fiyat bildirimleri için Safari'den <strong>Paylaş (↑) → Ana Ekrana Ekle</strong> yapıp uygulamayı ana ekrandan açın.
+      </p>
+    `;
+    return;
+  }
+
+  if (!env.supported) {
+    box.innerHTML = `
+      <div class="settings-push-status">
+        <span class="status-dot"></span>
+        <span>Bu tarayıcıda bildirim desteği yok</span>
+      </div>
+    `;
+    return;
+  }
+
+  if (env.permission === "denied") {
+    box.innerHTML = `
+      <div class="settings-push-status">
+        <span class="status-dot warn"></span>
+        <span>Bildirim izni kapalı</span>
+      </div>
+      <p class="muted-text" style="margin:0;font-size:0.78rem;">
+        iPhone Ayarlar → Bildirimler → FiyatRadar menüsünden bildirimlere izin verebilirsiniz.
+      </p>
+    `;
+    return;
+  }
+
+  const active = Boolean(state.pushSubscribed);
+  box.innerHTML = `
+    <div class="settings-push-status">
+      <span class="status-dot ${active ? "good" : ""}"></span>
+      <span>${active ? "Kilit Ekranı Bildirimleri Aktif" : "Bildirimler Kapalı"}</span>
+    </div>
+    <p class="muted-text" style="margin:0;font-size:0.78rem;">
+      Takip listenizdeki ürün hedef fiyata düştüğünde veya önemli indirim yakaladığında anında haber verilir.
+    </p>
+    <div class="settings-btn-grid">
+      ${
+        active
+          ? `<button type="button" id="settingsTestPushBtn" class="btn btn-secondary btn-sm">Test Bildirimi Gönder</button>
+             <button type="button" id="settingsDisablePushBtn" class="btn btn-ghost btn-sm">Bildirimleri Kapat</button>`
+          : `<button type="button" id="settingsEnablePushBtn" class="btn btn-primary btn-sm" style="grid-column:1/-1;">Bildirimleri Aç</button>`
+      }
+    </div>
+  `;
+
+  $("settingsEnablePushBtn")?.addEventListener("click", async () => {
+    if (state.pushBusy) return;
+    state.pushBusy = true;
+    try {
+      await subscribeToPush(apiFetch);
+      state.pushSubscribed = true;
+      showToast("Kilit ekranı fiyat bildirimleri açıldı!");
+      renderSettingsPushBox();
+      if (state.activeView === "watchlist") renderPushAlertCard();
+    } catch (err) {
+      showToast(err.message || "Bildirim izni alınamadı.");
+    } finally {
+      state.pushBusy = false;
+    }
+  });
+
+  $("settingsTestPushBtn")?.addEventListener("click", async () => {
+    if (state.pushBusy) return;
+    state.pushBusy = true;
+    try {
+      await sendTestPush(apiFetch);
+      showToast("Test bildirimi gönderildi!");
+    } catch (err) {
+      showToast(err.message || "Test bildirimi gönderilemedi.");
+    } finally {
+      state.pushBusy = false;
+    }
+  });
+
+  $("settingsDisablePushBtn")?.addEventListener("click", async () => {
+    if (state.pushBusy) return;
+    state.pushBusy = true;
+    try {
+      await unsubscribeFromPush(apiFetch);
+      state.pushSubscribed = false;
+      showToast("Bildirimler kapatıldı.");
+      renderSettingsPushBox();
+      if (state.activeView === "watchlist") renderPushAlertCard();
+    } catch (err) {
+      showToast(err.message || "Bildirim kapatılamadı.");
+    } finally {
+      state.pushBusy = false;
+    }
+  });
+}
+
+function exportAppBackupJson() {
+  try {
+    const payload = {
+      app: "FiyatRadar",
+      version: 14,
+      exportedAt: new Date().toISOString(),
+      prefs: state.prefs,
+      watchlist: state.watchlist.length ? state.watchlist : loadLocalWatchlist(),
+      customFolders: state.customFolders,
+      cart: state.cart,
+      compareBasket: state.compareBasket,
+      snapshots: JSON.parse(localStorage.getItem("fiyatradar_snapshots") || "{}"),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+    const dlUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const dateTag = new Date().toISOString().slice(0, 10);
+    a.href = dlUrl;
+    a.download = `fiyatradar-yedek-${dateTag}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(dlUrl), 1500);
+    showToast("Yedek dosyası (JSON) indirildi.");
+  } catch {
+    showToast("Yedek dosyası oluşturulamadı.");
+  }
+}
+
+async function importAppBackupJson(file) {
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    if (!data || typeof data !== "object") {
+      throw new Error("Geçersiz yedek dosyası.");
+    }
+
+    if (data.prefs && typeof data.prefs === "object") {
+      saveUserPrefs(data.prefs);
+      setThemePreference(state.prefs.themeMode);
+      if (els.searchSortSelect && state.prefs.defaultSort) {
+        els.searchSortSelect.value = state.prefs.defaultSort;
+      }
+    }
+    if (Array.isArray(data.customFolders)) {
+      state.customFolders = data.customFolders.filter((f) => typeof f === "string" && f.trim());
+      saveLocalCustomFolders();
+    }
+    if (Array.isArray(data.cart)) {
+      state.cart = data.cart.slice(0, 20);
+      saveLocalCart();
+      updateCartBadges();
+    }
+    if (Array.isArray(data.compareBasket)) {
+      state.compareBasket = data.compareBasket.slice(0, 5);
+      saveLocalCompare();
+      updateCompareBadges();
+    }
+    if (data.snapshots && typeof data.snapshots === "object") {
+      localStorage.setItem("fiyatradar_snapshots", JSON.stringify(data.snapshots));
+    }
+    if (Array.isArray(data.watchlist) && data.watchlist.length) {
+      saveLocalWatchlist(data.watchlist);
+      await Promise.all(
+        data.watchlist.slice(0, 50).map((w) =>
+          apiFetch("/api/watchlist", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              id: w.id,
+              title: w.title,
+              url: w.url,
+              image: w.image || "",
+              folder: w.folder || "",
+              targetPrice: w.target_price ?? null,
+              lastNetPrice: w.last_net_price ?? null,
+              lastStore: w.last_store || "",
+            }),
+          }).catch(() => {})
+        )
+      );
+      await loadWatchlist();
+    }
+
+    syncSettingsModalUI();
+    showToast("Yedek başarıyla geri yüklendi!");
+  } catch (err) {
+    showToast(err.message || "Yedek dosyası okunamadı.");
+  }
+}
+
+async function refreshAppCacheAndReload() {
+  showToast("Önbellek temizleniyor ve uygulama yenileniyor...");
+  try {
+    if ("caches" in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    }
+    if ("serviceWorker" in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map((r) => r.update().catch(() => {})));
+    }
+  } catch {
+    // Non-fatal
+  }
+  setTimeout(() => window.location.reload(), 350);
+}
+
+function resetAllLocalAppData() {
+  const confirmed = window.confirm(
+    "Sepet, karşılaştırma listesi, kişisel fiyat kayıtları ve uygulama tercihleriniz sıfırlanacak. Devam edilsin mi?"
+  );
+  if (!confirmed) return;
+  try {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith("fiyatradar_")) keys.push(k);
+    }
+    keys.forEach((k) => localStorage.removeItem(k));
+  } catch {
+    // Ignore
+  }
+  showToast("Tüm yerel veriler sıfırlandı. Yenileniyor...");
+  setTimeout(() => window.location.reload(), 450);
+}
+
+function updateLiveNetworkStatus(online = true) {
+  if (!els.settingsLiveStatus) return;
+  els.settingsLiveStatus.innerHTML = online
+    ? `<span class="status-dot good"></span><span>Canlı Mağaza Ağı Aktif</span>`
+    : `<span class="status-dot warn"></span><span>Bağlantı Kontrol Ediliyor</span>`;
+}
+
 function openSettingsModal() {
   if (!els.settingsModal) return;
-  const { serperKey, serpApiKey } = getStoredApiKeys();
-  if (els.serperKeyInput) els.serperKeyInput.value = serperKey;
-  if (els.serpApiKeyInput) els.serpApiKeyInput.value = serpApiKey;
-  const statusEl = $("settingsTestStatus");
-  if (statusEl) statusEl.hidden = true;
+  syncSettingsModalUI();
+  renderSettingsPushBox();
   els.settingsModal.hidden = false;
+  apiFetch("/api/providers")
+    .then(() => updateLiveNetworkStatus(true))
+    .catch(() => updateLiveNetworkStatus(false));
 }
 
 function closeSettingsModal() {
@@ -4346,10 +4686,6 @@ bindEvents();
 initPwa();
 updateCompareBadges();
 updateCartBadges();
-updateApiStatusDot();
-apiFetch("/api/providers")
-  .then((p) => updateApiStatusDot(Boolean(p.googleShoppingReady)))
-  .catch(() => {});
 loadWatchlist();
 initPushClient();
 handleLaunchUrl(window.location.href);

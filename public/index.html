@@ -74,12 +74,11 @@
           </svg>
         </button>
 
-        <button type="button" id="openSettingsBtn" class="settings-icon-btn" aria-label="Kaynak ve API Ayarları" title="Kaynak ve API Ayarları">
+        <button type="button" id="openSettingsBtn" class="settings-icon-btn" aria-label="Uygulama Ayarları" title="Ayarlar">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="3"></circle>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
           </svg>
-          <span id="apiReadyDot" class="api-dot" hidden></span>
         </button>
       </div>
     </div>
@@ -460,37 +459,159 @@
     </div>
   </div>
 
-  <!-- Data Source & API Settings Modal -->
+  <!-- Consumer App Settings Modal -->
   <div id="settingsModal" class="modal-backdrop" hidden>
-    <div class="modal-sheet" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
+    <div class="modal-sheet app-settings-sheet" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
       <div class="modal-header">
-        <h3 id="settingsModalTitle">Veri Kaynakları & 70+ Mağaza API Ayarı</h3>
+        <h3 id="settingsModalTitle">Uygulama Ayarları</h3>
         <button type="button" id="closeSettingsBtn" class="clear-btn" style="position:static;" aria-label="Kapat">&times;</button>
       </div>
-      <p class="muted-text" style="margin:0 0 14px;">
-        <strong>Trendyol, Hepsiburada, Amazon TR, n11, Stradivarius, Zara, Boyner, MediaMarkt, Teknosa, Akakçe, Cimri</strong> dahil tüm Türkiye mağazalarını kesintisiz taramak için ücretsiz <strong>Serper.dev</strong> API anahtarı (2.500 ücretsiz arama) ekleyebilirsiniz.
-      </p>
 
-      <form id="settingsForm" class="settings-form">
-        <div class="form-field">
-          <label for="serperKeyInput">Serper.dev API Anahtarı (Önerilen — 2.500 ücretsiz arama)</label>
-          <input type="password" id="serperKeyInput" class="search-input" style="height:42px;padding:0 12px;" placeholder="serper.dev API anahtarınızı yapıştırın..." autocomplete="off" />
-          <a href="https://serper.dev" target="_blank" rel="noopener noreferrer" class="field-help-link">Ücretsiz Serper.dev anahtarı al (20 sn) ↗</a>
+      <!-- 1. Görünüm (Tema) -->
+      <div class="settings-group">
+        <h4 class="settings-group-title">Görünüm</h4>
+        <div class="settings-segmented" id="settingsThemeSegmented" role="radiogroup" aria-label="Tema Modu">
+          <button type="button" class="settings-seg-btn" data-theme-pref="system">Sistem</button>
+          <button type="button" class="settings-seg-btn" data-theme-pref="light">Aydınlık</button>
+          <button type="button" class="settings-seg-btn" data-theme-pref="dark">Karanlık</button>
+        </div>
+      </div>
+
+      <!-- 2. Arama & Güvenlik Varsayılanları -->
+      <div class="settings-group">
+        <h4 class="settings-group-title">Arama & Güvenlik Filtreleri</h4>
+
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <strong>Varsayılan Sıralama</strong>
+            <span>Arama sonuçlarının başlangıç düzeni</span>
+          </div>
+          <select id="prefDefaultSort" class="settings-select" aria-label="Varsayılan sıralama">
+            <option value="relevance">Alaka Düzeyi</option>
+            <option value="price_asc">En Ucuz Fiyat</option>
+            <option value="unit_asc">En Ucuz Birim</option>
+            <option value="offers_desc">En Çok Satıcılı</option>
+          </select>
         </div>
 
-        <div class="form-field">
-          <label for="serpApiKeyInput">Alternatif: SerpAPI Anahtarı (Opsiyonel)</label>
-          <input type="password" id="serpApiKeyInput" class="search-input" style="height:42px;padding:0 12px;" placeholder="serpapi.com API anahtarı..." autocomplete="off" />
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <strong>Aksesuarları Otomatik Gizle</strong>
+            <span>Kılıf, kırılmaz cam ve yedek parçaları ayıkla</span>
+          </div>
+          <label class="ios-switch">
+            <input type="checkbox" id="prefHideAccessories" />
+            <span class="ios-switch-track"></span>
+          </label>
         </div>
 
-        <div id="settingsTestStatus" class="muted-text" style="font-weight:600;margin:0;" hidden></div>
-
-        <div class="modal-actions">
-          <button type="button" id="clearApiKeysBtn" class="btn btn-ghost btn-sm">Temizle</button>
-          <button type="button" id="testApiKeyBtn" class="btn btn-secondary btn-sm">Test Et</button>
-          <button type="submit" class="btn btn-primary btn-sm">Kaydet ve Aktifleştir</button>
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <strong>İthalatçı / Yenilenmiş Gizle</strong>
+            <span>Ürün tekliflerinde sadece sıfır & TR garantilileri öne çıkar</span>
+          </div>
+          <label class="ios-switch">
+            <input type="checkbox" id="prefHideImporterRefurb" />
+            <span class="ios-switch-track"></span>
+          </label>
         </div>
-      </form>
+
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <strong>Sadece Yetkili Satıcılar</strong>
+            <span>Öncelikli olarak resmi ve doğrulanmış mağazaları göster</span>
+          </div>
+          <label class="ios-switch">
+            <input type="checkbox" id="prefAuthorizedOnly" />
+            <span class="ios-switch-track"></span>
+          </label>
+        </div>
+
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <strong>Sadece Ücretsiz Kargo</strong>
+            <span>Kargo ücreti olmayan teklifleri öne çıkar</span>
+          </div>
+          <label class="ios-switch">
+            <input type="checkbox" id="prefFreeShippingOnly" />
+            <span class="ios-switch-track"></span>
+          </label>
+        </div>
+      </div>
+
+      <!-- 3. Taksit Hesaplayıcı Varsayılanı -->
+      <div class="settings-group">
+        <h4 class="settings-group-title">Taksit Hesaplayıcı Varsayılanı</h4>
+
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <strong>Varsayılan Taksit</strong>
+            <span>Ürün detayında otomatik seçilecek taksit sayısı</span>
+          </div>
+          <select id="prefInstallmentMonths" class="settings-select" aria-label="Varsayılan taksit sayısı">
+            <option value="1">Peşin (Tek Çekim)</option>
+            <option value="3">3 Taksit</option>
+            <option value="6">6 Taksit</option>
+            <option value="9">9 Taksit</option>
+            <option value="12">12 Taksit</option>
+          </select>
+        </div>
+
+        <div class="settings-row">
+          <div class="settings-row-copy">
+            <strong>Aylık Vade Oranı</strong>
+            <span>Kredi kartı taksit faiz tahmini</span>
+          </div>
+          <select id="prefInstallmentRate" class="settings-select" aria-label="Varsayılan aylık vade oranı">
+            <option value="0">%0 (Vadesiz)</option>
+            <option value="2.5">%2,5 / ay</option>
+            <option value="3.5">%3,5 / ay</option>
+            <option value="4.5">%4,5 / ay</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- 4. Bildirimler -->
+      <div class="settings-group">
+        <h4 class="settings-group-title">Fiyat Düşüşü Bildirimleri</h4>
+        <div id="settingsPushBox" class="settings-push-box"></div>
+      </div>
+
+      <!-- 5. Veri, Yedekleme & Gizlilik -->
+      <div class="settings-group">
+        <h4 class="settings-group-title">Veri, Yedekleme & Gizlilik</h4>
+        <div class="settings-btn-grid">
+          <button type="button" id="exportBackupBtn" class="btn btn-secondary btn-sm">Yedek İndir (JSON)</button>
+          <button type="button" id="importBackupBtn" class="btn btn-secondary btn-sm">Yedek Yükle</button>
+          <button type="button" id="settingsClearHistoryBtn" class="btn btn-secondary btn-sm">Geçmişi Temizle</button>
+          <button type="button" id="refreshAppCacheBtn" class="btn btn-secondary btn-sm">Önbelleği Yenile</button>
+        </div>
+        <input type="file" id="importBackupInput" accept="application/json,.json" hidden />
+        <button type="button" id="resetAllDataBtn" class="btn btn-ghost btn-sm settings-danger-btn" style="width:100%;margin-top:8px;">
+          Tüm Yerel Verileri Sıfırla
+        </button>
+      </div>
+
+      <!-- 6. Hakkında -->
+      <div class="settings-group" style="margin-bottom:0;">
+        <h4 class="settings-group-title">Hakkında</h4>
+        <div class="settings-about-row">
+          <div class="settings-about-brand">
+            <img src="/icons/icon-192.png?v=10" alt="" class="settings-about-icon" />
+            <div class="settings-row-copy">
+              <strong>FiyatRadar</strong>
+              <span>Sürüm 14 · Canlı Türkiye Fiyat Analizi</span>
+            </div>
+          </div>
+          <span class="settings-push-status" id="settingsLiveStatus" style="font-size:0.78rem;">
+            <span class="status-dot good"></span>
+            <span>Canlı Mağaza Ağı Aktif</span>
+          </span>
+        </div>
+        <p class="muted-text" style="margin:10px 0 0;font-size:0.76rem;">
+          Tercihleriniz, sepetiniz ve karşılaştırma listeniz yalnızca kendi cihazınızda saklanır.
+        </p>
+      </div>
     </div>
   </div>
 
