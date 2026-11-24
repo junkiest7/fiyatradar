@@ -232,17 +232,18 @@ export function parseDeliverySpeed(deliveryText) {
   const lower = txt.toLocaleLowerCase("tr-TR");
 
   if (!txt) return { label: "Standart", days: 3, score: 0.55 };
+  const isLong = txt.length > 36;
   if (lower.includes("aynı gün") || lower.includes("bugün")) {
-    return { label: txt, days: 0, score: 1.0 };
+    return { label: isLong ? "Aynı gün kargo" : txt, days: 0, score: 1.0 };
   }
   if (lower.includes("yarın")) {
-    return { label: txt, days: 1, score: 0.92 };
+    return { label: isLong ? "Yarın kargoda" : txt, days: 1, score: 0.92 };
   }
   const dayMatch = lower.match(/(\d+)\s*(?:iş\s*)?gün/);
   if (dayMatch) {
     const days = Number.parseInt(dayMatch[1], 10);
     const score = days <= 1 ? 0.9 : days === 2 ? 0.78 : days <= 3 ? 0.65 : days <= 5 ? 0.45 : 0.3;
-    return { label: txt, days, score };
+    return { label: isLong ? `${days} günde kargo` : txt, days, score };
   }
   return { label: txt, days: 3, score: 0.55 };
 }

@@ -18,6 +18,7 @@ import {
 import { analyzeOffers, analyzePriceHistory } from "./analyzer.js";
 import {
   getVirtualDetail,
+  mergeLiveAndSerperResults,
   searchOfficialFallback,
   searchSerpApiTurkey,
   searchSerperTurkey,
@@ -211,21 +212,30 @@ export async function searchProducts(query, options = {}) {
     };
   }
 
-  // Priority 1: Google Türkiye Search via Serper.dev (supports multi-key rotation & failover!)
+  // Priority 1: Hybrid Serper.dev + Live Official Turkish Store Network (parallel real-time price grounding!)
   if (serperKeys.length > 0) {
     const cKey = `serper-tr:${q.toLocaleLowerCase("tr-TR")}`;
     if (!options.refresh) {
       const cached = getCached(cKey);
       if (cached) return { ...cached, cached: true, resolvedFromLink };
     }
+    const livePromise = searchOfficialFallback(q).catch(() => null);
     for (const key of serperKeys) {
       try {
-        const result = await searchSerperTurkey(q, key);
-        setCached(cKey, result, SEARCH_TTL_MS);
-        return { ...result, resolvedFromLink };
+        const serperRes = await searchSerperTurkey(q, key);
+        const liveRes = await livePromise;
+        const merged = mergeLiveAndSerperResults(serperRes, liveRes);
+        setCached(cKey, merged, SEARCH_TTL_MS);
+        return { ...merged, resolvedFromLink };
       } catch {
         // Rotate to next key or fall through to zero-key live engine
       }
+    }
+    // If all Serper keys failed, reuse the already-fetched live official store network result!
+    const liveFallback = await livePromise;
+    if (liveFallback && liveFallback.totalFound > 0) {
+      setCached(cKey, liveFallback, 5 * 60 * 1000);
+      return { ...liveFallback, resolvedFromLink };
     }
   }
 

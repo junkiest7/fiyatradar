@@ -1388,6 +1388,7 @@ function renderSearchResults() {
             ${p.trustShield?.condition === "demo" ? `<span class="mini-badge trap">⚠ Teşhir</span>` : ""}
             ${p.trustShield?.warranty === "importer" ? `<span class="mini-badge warn">⚠ İthalatçı</span>` : ""}
             ${p.isListingPage ? `<span class="mini-badge fast">Kategori Sayfası</span>` : ""}
+            ${p.priceVerified === false && p.lowestPrice ? `<span class="mini-badge warn" title="Google önbellek fiyatı; mağaza sayfasında anlık değişebilir">⚠ İndeks Fiyatı</span>` : ""}
             ${p.priceSource === "installment" ? `<span class="mini-badge fast" title="Peşin fiyatına taksit bilgisinden toplam tutar olarak hesaplandı">Peşin Toplam</span>` : ""}
             ${p.isAccessory ? `<span class="mini-badge trap">Aksesuar</span>` : ""}
           </div>
@@ -1759,18 +1760,8 @@ function renderDetailView() {
     <!-- Authenticity, Official TR Warranty vs Importer Warranty & Seller Trust Shield -->
     ${renderTrustShieldPanel(d.trustSummary, stats)}
 
-    <!-- Top 3 Picks -->
-    ${
-      picks
-        ? `
-      <div class="picks-grid">
-        ${renderPickCard("Kargo Dahil En Ucuz", "cheapest", picks.cheapestNet, d.unitInfo, true)}
-        ${renderPickCard("En Dengeli / Güvenilir Tercih", "balanced", picks.bestValue, d.unitInfo, false)}
-        ${renderPickCard("En Hızlı Teslimat", "fast", picks.fastestCompetitive, d.unitInfo, false)}
-      </div>
-    `
-        : ""
-    }
+    <!-- Top Picks (auto-deduplicated when multiple categories point to the same best offer) -->
+    ${renderTopPickCards(picks, d.unitInfo)}
 
     <!-- Credit Card Installment Calculator -->
     ${
@@ -2162,8 +2153,45 @@ function renderDetailView() {
   });
 }
 
+function renderTopPickCards(picks, unitInfo) {
+  if (!picks) return "";
+  const rawList = [
+    { title: "Kargo Dahil En Ucuz", badgeClass: "cheapest", pick: picks.cheapestNet, isPrimary: true },
+    { title: "En Dengeli / Güvenilir Tercih", badgeClass: "balanced", pick: picks.bestValue, isPrimary: false },
+    { title: "En Hızlı Teslimat", badgeClass: "fast", pick: picks.fastestCompetitive, isPrimary: false },
+  ].filter((x) => x.pick);
+
+  // Deduplicate identical offers (e.g. when a single store wins all 3 categories, show 1 crisp combined card!)
+  const grouped = [];
+  for (const item of rawList) {
+    const key = item.pick.id || item.pick.url || `${item.pick.store}:${item.pick.netPrice}`;
+    const existing = grouped.find((g) => g.key === key);
+    if (existing) {
+      existing.titles.push(item.title);
+      if (item.isPrimary) existing.isPrimary = true;
+    } else {
+      grouped.push({
+        key,
+        titles: [item.title],
+        badgeClass: item.badgeClass,
+        pick: item.pick,
+        isPrimary: item.isPrimary,
+      });
+    }
+  }
+
+  return `
+    <div class="picks-grid" style="${grouped.length === 1 ? "grid-template-columns:1fr;" : ""}">
+      ${grouped
+        .map((g) => renderPickCard(g.titles.join(" · "), g.badgeClass, g.pick, unitInfo, g.isPrimary))
+        .join("")}
+    </div>
+  `;
+}
+
 function renderPickCard(title, badgeClass, pick, unitInfo, isPrimary) {
   if (!pick) return "";
+  const isUnverifiedIndex = pick.priceVerified === false;
   return `
     <div class="pick-card ${isPrimary ? "primary-pick" : ""}">
       <div class="pick-header">
@@ -2179,6 +2207,11 @@ function renderPickCard(title, badgeClass, pick, unitInfo, isPrimary) {
         <span class="pick-ship ${pick.shippingCost === 0 ? "free" : ""}">${esc(pick.shippingLabel)}</span>
       </div>
       <div class="pick-meta">
+        ${
+          isUnverifiedIndex
+            ? `<span class="mini-badge warn" style="margin-right:4px;">⚠ İndeks Fiyatı (Mağazada Değişebilir)</span>`
+            : `<span class="mini-badge official" style="margin-right:4px;">✓ Canlı Doğrulandı</span>`
+        }
         ${pick.deliveryLabel ? `${esc(pick.deliveryLabel)} · ` : ""}${esc(pick.stockText || "Stokta")}
         ${pick.unitPrice && unitInfo ? ` · ${fmtTL(pick.unitPrice)} / ${esc(unitInfo.unitLabel)}` : ""}
       </div>

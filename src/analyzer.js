@@ -357,6 +357,8 @@ function pickSummary(o) {
     trustTier: o.trustShield?.trustTier || "standard",
     warrantyLabel: o.trustShield?.warrantyLabel || "",
     conditionLabel: o.trustShield?.condition !== "new" ? o.trustShield?.conditionLabel || "" : "",
+    priceVerified: o.priceVerified !== false,
+    priceSource: o.priceSource || "live",
   };
 }
 

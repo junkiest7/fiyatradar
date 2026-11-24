@@ -198,10 +198,29 @@ export function resolveStoreFromUrl(urlStr, fallbackSource = "") {
   };
 }
 
+const PRICE_AGGREGATOR_DOMAINS = [
+  "cimri.com",
+  "epey.com",
+  "akakce.com",
+  "fiyat.com",
+  "enuygun.com",
+  "ucuzu.com",
+  "bilio.com",
+];
+
 function isNonShoppingUrl(urlStr) {
   try {
     const host = new URL(urlStr).hostname.replace(/^www\./i, "").toLowerCase();
     return NON_SHOPPING_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`));
+  } catch {
+    return false;
+  }
+}
+
+export function isPriceAggregatorUrl(urlStr) {
+  try {
+    const host = new URL(urlStr).hostname.replace(/^www\.|^m\./i, "").toLowerCase();
+    return PRICE_AGGREGATOR_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`));
   } catch {
     return false;
   }
@@ -557,6 +576,20 @@ export function extractOrganicPriceInfo(item) {
     return { price: null, shipping, source: "listing" };
   }
 
+  // 2b. If link is a price-comparison aggregator (Cimri, Epey, Akakçe), NEVER trust stale Google SERP snippet prices!
+  if (item?.link && isPriceAggregatorUrl(item.link)) {
+    return { price: null, shipping, source: "aggregator" };
+  }
+
+  // 2c. If we live-verified the exact checkout price directly from the store page right now, trust it 100%!
+  if (typeof item?._liveVerifiedPrice === "number" && item._liveVerifiedPrice >= 10) {
+    return {
+      price: Math.round(item._liveVerifiedPrice * 100) / 100,
+      shipping,
+      source: "live_verified",
+    };
+  }
+
   const asciiCombined = transliterateTr(combinedText);
   const installmentTotals = [];
   const installmentUnitValues = [];
@@ -663,6 +696,14 @@ export function extractOrganicPriceInfo(item) {
     const before = transliterateTr(beforeRaw).toLowerCase();
     const after = transliterateTr(afterRaw).toLowerCase();
 
+    // Historical / dated / aggregator summary prices (e.g. "20.11.2026 tarihinde 1.399,00 TL", "12 satıcı arasındaki en ucuz")
+    if (/(tarihinde|tarihli|satici\s+arasindaki|son\s+\d+\s+(?:ayin|gunun|haftanin)|en\s+dusuk\s+fiyati?|en\s+yuksek\s+fiyati?|eski\s+fiyati?)\s*[:,-]?\s*$/i.test(before)) {
+      return true;
+    }
+    if (/^\s*(?:idi|oldu|seviyesinde|tarihinde|ile\s+son\s+\d+)/i.test(after)) {
+      return true;
+    }
+
     // Installment cues before or after the number (regardless of price magnitude!)
     if (/(\d{1,2}\s*[x×]\s*$|\btaksit(?:le|li|i|e|ten|ler)?\s*[:x×-]?\s*$|\bayda\s*$|\baylik\s*$|\bher\s+ay\s*$|\d{1,2}\s*ay\s*[:x×-]?\s*$)/i.test(before)) {
       return true;
@@ -695,7 +736,7 @@ export function extractOrganicPriceInfo(item) {
   for (const m of combinedText.matchAll(afterRe)) {
     const val = parseTrPrice(m[1]);
     if (!val || val < 10) continue;
-    const beforeCtx = combinedText.slice(Math.max(0, (m.index || 0) - 36), m.index || 0);
+    const beforeCtx = combinedText.slice(Math.max(0, (m.index || 0) - 48), m.index || 0);
     const afterCtx = combinedText.slice((m.index || 0) + m[0].length, (m.index || 0) + m[0].length + 36);
     if (isDisqualifiedByContext(beforeCtx, afterCtx)) continue;
     if (looksLikeInstallmentUnit(val)) continue;
@@ -707,7 +748,7 @@ export function extractOrganicPriceInfo(item) {
   for (const m of combinedText.matchAll(beforeRe)) {
     const val = parseTrPrice(m[1]);
     if (!val || val < 10) continue;
-    const beforeCtx = combinedText.slice(Math.max(0, (m.index || 0) - 36), m.index || 0);
+    const beforeCtx = combinedText.slice(Math.max(0, (m.index || 0) - 48), m.index || 0);
     const afterCtx = combinedText.slice((m.index || 0) + m[0].length, (m.index || 0) + m[0].length + 36);
     if (isDisqualifiedByContext(beforeCtx, afterCtx)) continue;
     if (looksLikeInstallmentUnit(val)) continue;
@@ -724,9 +765,10 @@ export function extractOrganicPriceInfo(item) {
   return { price: null, shipping, source: "none" };
 }
 
-// Image & OG-image enrichment caches (15-30 min TTL)
+// Image, OG-image & live checkout price verification caches (10-30 min TTL)
 const imageCache = new Map();
 const ogImageCache = new Map();
+const livePriceCache = new Map();
 
 function getCachedImages(qKey) {
   const entry = imageCache.get(qKey);
@@ -745,15 +787,120 @@ function setCachedImages(qKey, images) {
   imageCache.set(qKey, { images, expiresAt: Date.now() + 15 * 60 * 1000 });
 }
 
-// Stores whose product pages respond cleanly to fast lightweight og:image metadata lookups
-const FAST_OG_HOSTS = ["idefix.com", "akakce.com", "migros.com.tr", "pazarama.com", "cimri.com"];
+// Stores whose product pages respond cleanly to fast lightweight og:image & live checkout price lookups
+const FAST_OG_HOSTS = [
+  "superstep.com.tr",
+  "fashfed.com",
+  "intersport.com.tr",
+  "barcin.com",
+  "sportive.com.tr",
+  "sporjinal.com",
+  "koton.com",
+  "tefal.com.tr",
+  "lacoste.com.tr",
+  "converse.com.tr",
+  "beymen.com",
+  "dr.com.tr",
+  "migros.com.tr",
+  "idefix.com",
+  "pazarama.com",
+];
 
 function isFastOgHost(urlStr) {
   try {
-    const host = new URL(urlStr).hostname.replace(/^www\./i, "").toLowerCase();
+    const host = new URL(urlStr).hostname.replace(/^www\.|^m\./i, "").toLowerCase();
     return FAST_OG_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
   } catch {
     return false;
+  }
+}
+
+/**
+ * Live-verifies the actual current checkout price & og:image directly from a Turkish store's
+ * product page (JSON-LD Product/Offer.price + product:price:amount meta tags), eliminating
+ * stale Google SERP snippet price mismatches.
+ */
+export async function fetchLiveProductPrice(urlStr) {
+  if (!urlStr || !isFastOgHost(urlStr)) return null;
+  const cached = livePriceCache.get(urlStr);
+  if (cached && Date.now() <= cached.expiresAt) return cached.data;
+
+  try {
+    const res = await fetch(urlStr, {
+      headers: { "User-Agent": UA, "Accept-Language": "tr-TR,tr;q=0.9", Accept: "text/html" },
+      signal: AbortSignal.timeout(2500),
+      redirect: "follow",
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    if (/Just a moment|cf-browser-verification|challenge-platform/i.test(html)) return null;
+
+    let livePrice = null;
+    let inStock = true;
+    let ogImg = "";
+
+    // 1. JSON-LD Product / Offer schema (most accurate live checkout price across Turkish retailers)
+    const ldMatches = [...html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
+    for (const m of ldMatches) {
+      try {
+        const parsed = JSON.parse(m[1]);
+        const nodes = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.["@graph"]) ? parsed["@graph"] : [parsed];
+        for (const node of nodes) {
+          if (!node || typeof node !== "object") continue;
+          const offersRaw = node.offers;
+          if (!offersRaw) continue;
+          const offerList = Array.isArray(offersRaw) ? offersRaw : [offersRaw];
+          for (const off of offerList) {
+            const rawP = off?.price ?? off?.lowPrice;
+            const parsedP = typeof rawP === "number" ? rawP : parseTrPrice(String(rawP || ""));
+            if (parsedP && parsedP >= 10 && (livePrice === null || parsedP < livePrice)) {
+              livePrice = Math.round(parsedP * 100) / 100;
+            }
+            if (typeof off?.availability === "string" && /OutOfStock/i.test(off.availability)) {
+              inStock = false;
+            }
+          }
+          if (!ogImg && typeof node.image === "string" && /^https?:\/\//i.test(node.image)) {
+            ogImg = node.image;
+          } else if (!ogImg && Array.isArray(node.image) && typeof node.image[0] === "string") {
+            ogImg = node.image[0];
+          }
+        }
+      } catch {
+        // Ignore malformed LD+JSON blocks
+      }
+    }
+
+    // 2. Fallback to product:price:amount / og:price:amount / itemprop="price" meta tags
+    if (livePrice === null) {
+      const metaMatch =
+        html.match(/property=["'](?:product|og):price:amount["'][^>]*content=["']([^"']+)["']/i) ||
+        html.match(/content=["']([^"']+)["'][^>]*property=["'](?:product|og):price:amount["']/i) ||
+        html.match(/itemprop=["']price["'][^>]*content=["']([^"']+)["']/i);
+      if (metaMatch?.[1]) {
+        const p = parseTrPrice(metaMatch[1]);
+        if (p && p >= 10) livePrice = Math.round(p * 100) / 100;
+      }
+    }
+
+    // 3. Extract og:image if not found in JSON-LD
+    if (!ogImg) {
+      const ogMatch =
+        html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i) ||
+        html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["']/i);
+      ogImg = ogMatch?.[1]?.trim() || "";
+      if (ogImg.startsWith("//")) ogImg = `https:${ogImg}`;
+      if (!/^https?:\/\//i.test(ogImg) || /favicon|logo|placeholder/i.test(ogImg)) ogImg = "";
+    }
+
+    const result = { price: livePrice, inStock, image: ogImg };
+    if (livePriceCache.size > 300) {
+      livePriceCache.delete(livePriceCache.keys().next().value);
+    }
+    livePriceCache.set(urlStr, { data: result, expiresAt: Date.now() + 10 * 60 * 1000 });
+    return result;
+  } catch {
+    return null;
   }
 }
 
@@ -913,22 +1060,21 @@ export async function searchSerperTurkey(query, apiKey) {
   let combinedOrganic = [...organic1];
   const extraInlineImages = Array.isArray(data1.images) ? [...data1.images] : [];
 
-  // Count how many DIRECT (non-listing, non-accessory) priced product pages came back from Query 1
+  // Count how many DIRECT (non-listing, non-aggregator, non-accessory) priced product pages came back from Query 1
   const directPricedCount1 = organic1.filter((it) => {
-    if (!it?.link || isNonShoppingUrl(it.link)) return false;
+    if (!it?.link || isNonShoppingUrl(it.link) || isPriceAggregatorUrl(it.link)) return false;
     if (classifyStoreUrl(it.link, it.title).isListingPage) return false;
     if (isAccessoryTitle(it.title, query)) return false;
     return extractOrganicPriceInfo(it).price !== null;
   }).length;
 
-  // Query 2 (when < 5 direct priced product pages): explicitly target DIRECT PRODUCT URLs
-  // (-p- on Trendyol/Hepsiburada/Boyner/idefix/Pazarama/Teknosa/Migros/Gratis/Watsons,
-  //  /dp/ on Amazon TR, /urun/ on n11/LCW, fiyati, on Akakçe) so category/search pages don't dominate!
+  // Query 2 (when < 5 direct priced product pages): explicitly target REAL DIRECT STORE PRODUCT URLs
+  // (never price-comparison aggregators like Cimri/Epey/Akakçe!)
   if (directPricedCount1 < 5) {
     try {
       const qTarget = asciiQuery !== query && organic1.length === 0 ? asciiQuery : query;
       const data2 = await callSerper("search", {
-        q: `${qTarget} fiyat (inurl:-p- OR inurl:/dp/ OR inurl:/urun/ OR inurl:fiyati,)`,
+        q: `${qTarget} fiyat (inurl:-p- OR inurl:/dp/ OR inurl:/urun/ OR inurl:/p_)`,
         gl: "tr",
         hl: "tr",
         num: 10,
@@ -944,12 +1090,43 @@ export async function searchSerperTurkey(query, apiKey) {
     }
   }
 
+  // Live-verify actual checkout prices (and og:image) directly from open Turkish store pages
+  // so stale Google SERP snippet prices are overwritten with real-time checkout prices!
+  const liveVerifyCandidates = combinedOrganic
+    .filter(
+      (it) =>
+        it?.link &&
+        !isNonShoppingUrl(it.link) &&
+        !isPriceAggregatorUrl(it.link) &&
+        !classifyStoreUrl(it.link, it.title).isListingPage &&
+        isFastOgHost(it.link)
+    )
+    .slice(0, 8);
+  if (liveVerifyCandidates.length > 0) {
+    await Promise.all(
+      liveVerifyCandidates.map(async (it) => {
+        const live = await fetchLiveProductPrice(it.link);
+        if (!live) return;
+        if (typeof live.price === "number" && live.price >= 10) {
+          it._liveVerifiedPrice = live.price;
+        }
+        if (live.inStock === false) {
+          it._liveOutOfStock = true;
+        }
+        if (live.image && !isUsableDirectPhoto(it.imageUrl)) {
+          it.imageUrl = live.image;
+        }
+      })
+    );
+  }
+
   // Enrich with real product images + color-specific images for distinct variant colors!
   let imagePool = [...extraInlineImages];
   const nonListingNeedsPhoto = combinedOrganic.filter(
     (it) =>
       it?.link &&
       !isNonShoppingUrl(it.link) &&
+      !isPriceAggregatorUrl(it.link) &&
       !classifyStoreUrl(it.link, it.title).isListingPage &&
       !isUsableDirectPhoto(it.imageUrl) &&
       !isUsableDirectPhoto(it.thumbnailUrl)
@@ -1007,8 +1184,8 @@ export async function searchSerperTurkey(query, apiKey) {
       }
     }
 
-    // Fast og:image enrichment for non-WAF-blocked direct product pages (idefix, Akakçe, Migros, Pazarama)
-    const fastOgCandidates = nonListingNeedsPhoto.filter((it) => isFastOgHost(it.link)).slice(0, 4);
+    // Fast og:image enrichment fallback for remaining open pages without photos
+    const fastOgCandidates = nonListingNeedsPhoto.filter((it) => isFastOgHost(it.link) && !it.imageUrl).slice(0, 4);
     if (fastOgCandidates.length > 0) {
       await Promise.all(
         fastOgCandidates.map(async (it) => {
@@ -1262,7 +1439,7 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
     const link = item?.link;
     const title = String(item?.title || "").replace(/\s+/g, " ").trim();
     const normLink = normalizeUrlForMatch(link);
-    if (!link || !title || seenUrls.has(normLink) || isNonShoppingUrl(link)) continue;
+    if (!link || !title || seenUrls.has(normLink) || isNonShoppingUrl(link) || isPriceAggregatorUrl(link)) continue;
     seenUrls.add(normLink);
 
     const urlClass = classifyStoreUrl(link, title);
@@ -1308,6 +1485,8 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
     const offerCountHint = sellerCountMatch ? Number.parseInt(sellerCountMatch[1] || sellerCountMatch[2], 10) : 1;
     const isSecondHand = isSecondHandOffer(link, title);
     const secondHandCondition = isSecondHand ? detectSecondHandCondition(title, snippet) : null;
+    const isLiveVerified = priceInfo.source === "live_verified";
+    const outOfStock = Boolean(item._liveOutOfStock) || /tükendi|stokta yok/i.test(snippet);
 
     // Only direct single-product pages with a verified cash price become priced product offers!
     if (!urlClass.isListingPage && priceInfo.price !== null && priceInfo.price > 0) {
@@ -1318,15 +1497,17 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
         shipping: priceInfo.shipping,
         store,
         storeLogo: storeMeta.logoUrl,
-        stockText: /tükendi|stokta yok/i.test(snippet) ? "Stok kontrol edin" : isSecondHand ? secondHandCondition : "Stokta",
-        inStock: !/tükendi|stokta yok/i.test(snippet),
+        stockText: outOfStock ? "Stok kontrol edin" : isSecondHand ? secondHandCondition : "Stokta",
+        inStock: !outOfStock,
         delivery,
-        lastUpdated: item.date || "Canlı Google TR",
-        promoNote:
-          priceInfo.source === "installment"
+        lastUpdated: isLiveVerified ? "Canlı Doğrulandı" : "Google İndeks (Değişebilir)",
+        promoNote: isLiveVerified
+          ? "Fiyat mağaza sayfasından anlık doğrulandı"
+          : priceInfo.source === "installment"
             ? "Peşin fiyatına taksitten hesaplandı (toplam)"
-            : snippet.slice(0, 110),
+            : "Google indeks fiyatı — mağaza sayfasında anlık değişebilir",
         priceSource: priceInfo.source,
+        priceVerified: isLiveVerified,
         akakceBadge: "",
         url: link,
         isDirectLink: true,
@@ -1351,6 +1532,7 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
         image: matchedPhoto || storeMeta.logoUrl || (variantAttrs.color ? "" : defaultProductImage),
         lowestPrice: netEstimate,
         priceSource: priceInfo.source,
+        priceVerified: isLiveVerified,
         offerCount: offerCountHint,
         badge: storeMeta.platform,
         source: storeMeta.platform,
@@ -2395,7 +2577,21 @@ async function fetchDrStore(query) {
       .replace(/\s+/g, " ")
       .trim();
     const brand = String(gtm?.item_brand || "").trim();
-    const price = gtm?.price ? Number.parseFloat(gtm.price) : parseTrPrice($el.find(".prd-price").first().text());
+    const gtmPrice = gtm?.price ? Number.parseFloat(gtm.price) : null;
+    // D&R often displays a lower "Sepette X TL" checkout price inside .prd-price alongside the list price
+    const cardPriceText = $el.find("[class*='price']").text();
+    const cardPrices = [...cardPriceText.matchAll(/(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s*(?:TL|₺)/gi)]
+      .map((m) => parseTrPrice(m[1]))
+      .filter((v) => typeof v === "number" && v >= 10);
+    const minCardPrice = cardPrices.length ? Math.min(...cardPrices) : null;
+    const price =
+      minCardPrice && gtmPrice
+        ? Math.min(minCardPrice, gtmPrice)
+        : minCardPrice || gtmPrice;
+    const listPrice =
+      gtmPrice && minCardPrice && gtmPrice > minCardPrice
+        ? Math.round(gtmPrice * 100) / 100
+        : null;
     if (!title || !Number.isFinite(price) || price <= 0) return;
 
     const rel = matchesZeroKeyQuery(title, brand, gtm?.item_id || "", query);
@@ -2419,7 +2615,7 @@ async function fetchDrStore(query) {
       brand,
       code: extractModelStyleCode("", title),
       price: Math.round(price * 100) / 100,
-      listPrice: null,
+      listPrice,
       image,
       productUrl,
       inStock: gtm?.item_stock !== "No",
@@ -2498,7 +2694,9 @@ export function mergeZeroKeyStoreItems(rawItems, query) {
         stockText: it.inStock ? "Stokta" : "Kontrol edin",
         inStock: it.inStock,
         delivery: { label: it.deliveryLabel || "Kargo ile teslimat", days: it.deliveryDays ?? 2, score: 0.84 },
-        lastUpdated: "Canlı",
+        lastUpdated: "Canlı Doğrulandı",
+        priceVerified: true,
+        priceSource: "live_verified",
         promoNote: it.listPrice
           ? `Liste fiyatı: ${it.listPrice.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL`
           : "",
@@ -2564,6 +2762,8 @@ export function mergeZeroKeyStoreItems(rawItems, query) {
       isListingPage: false,
       image: bestImage,
       lowestPrice: minPrice,
+      priceSource: "live_verified",
+      priceVerified: true,
       offerCount: offers.length,
       badge: offers.length > 1 ? `${offers.length} Mağazada Kıyasla` : best.storeName,
       source: offers.length > 1 ? storeListText : best.storeName,
@@ -2584,6 +2784,65 @@ export function mergeZeroKeyStoreItems(rawItems, query) {
   });
 
   return products.map(({ _relScore, ...rest }) => rest);
+}
+
+/**
+ * Combines real-time live official Turkish store results (100% live checkout prices)
+ * with Serper/SerpAPI Google TR direct store results, always preferring the live store
+ * API price over any stale Google SERP snippet for matching URLs.
+ */
+export function mergeLiveAndSerperResults(serperResult, liveResult) {
+  const serperProds = Array.isArray(serperResult?.products) ? serperResult.products : [];
+  const liveProds = Array.isArray(liveResult?.products) ? liveResult.products : [];
+  if (!liveProds.length) return serperResult;
+  if (!serperProds.length) return liveResult;
+
+  const liveUrlSet = new Set();
+  for (const lp of liveProds) {
+    if (lp.externalUrl) liveUrlSet.add(normalizeUrlForMatch(lp.externalUrl));
+  }
+
+  // Compute median of live verified prices so wildly stale/wrong unverified Google snippets
+  // (e.g. a 1.399 TL outdated snippet when live stores are 4.400 TL) can be detected
+  const livePrices = liveProds
+    .filter((p) => !p.isAccessory && typeof p.lowestPrice === "number" && p.lowestPrice > 0)
+    .map((p) => p.lowestPrice)
+    .sort((a, b) => a - b);
+  const liveMedian = livePrices.length >= 3 ? livePrices[Math.floor(livePrices.length / 2)] : null;
+
+  const filteredSerper = serperProds.filter((sp) => {
+    if (sp.badge === "Tüm Mağazalar") return true;
+    if (sp.externalUrl && liveUrlSet.has(normalizeUrlForMatch(sp.externalUrl))) {
+      // Live store API already has the exact real-time checkout price for this URL!
+      return false;
+    }
+    // Drop unverified Google SERP snippets that are suspiciously < 45% of verified live market median
+    if (
+      liveMedian &&
+      sp.priceVerified === false &&
+      !sp.isAccessory &&
+      typeof sp.lowestPrice === "number" &&
+      sp.lowestPrice > 0 &&
+      sp.lowestPrice < liveMedian * 0.45
+    ) {
+      return false;
+    }
+    return true;
+  });
+
+  const summaryCards = filteredSerper.filter((p) => p.badge === "Tüm Mağazalar");
+  const serperDirect = filteredSerper.filter((p) => p.badge !== "Tüm Mağazalar" && !p.isListingPage);
+  const serperListings = filteredSerper.filter((p) => p.isListingPage);
+
+  // Interleave: live-verified official multi-store matches lead, followed by Serper direct stores (Trendyol/HB/Amazon)
+  const merged = [...summaryCards, ...liveProds.slice(0, 28), ...serperDirect, ...serperListings];
+
+  return {
+    ...serperResult,
+    provider: `${serperResult.provider} + Canlı Mağazalar`,
+    totalFound: merged.length,
+    products: merged,
+  };
 }
 
 /**

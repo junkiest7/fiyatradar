@@ -22,9 +22,12 @@ import {
   classifyStoreUrl,
   detectSecondHandCondition,
   extractOrganicPriceInfo,
+  fetchLiveProductPrice,
   getVirtualDetail,
+  isPriceAggregatorUrl,
   isSecondHandOffer,
   matchesZeroKeyQuery,
+  mergeLiveAndSerperResults,
   mergeZeroKeyStoreItems,
   pickBestProductImage,
   resolveBarcode,
@@ -1101,6 +1104,121 @@ test("v12 Direct Product Link Enforcement: rejects Adidas/Nike/FLO/SuperStep/gen
   assert.equal(classifyStoreUrl("https://www.sporjinal.com/adidas-vl-court-base-erkek-beyaz-spor-ayakkabi-id3711/", "adidas VL Court").isProductPage, true);
   assert.equal(classifyStoreUrl("https://www.dr.com.tr/elektronik/apple-airpods-4/urunno=0002136379001", "Apple AirPods 4").isProductPage, true);
 });
+
+test("v13 Live Checkout Price Accuracy: blocks stale Cimri/Epey aggregator snippets, rejects dated prices, and merges live store prices", async () => {
+  // 1. Price comparison aggregators MUST be recognized & excluded from merchant offers
+  assert.equal(isPriceAggregatorUrl("https://www.cimri.com/spor-ayakkabi/en-ucuz-adidas-samba-og-b75807,a12345"), true);
+  assert.equal(isPriceAggregatorUrl("https://www.akakce.com/spor-ayakkabi/en-ucuz-adidas-samba-fiyati,12345.html"), true);
+  assert.equal(isPriceAggregatorUrl("https://www.epey.com/akilli-telefonlar/apple-iphone-15.html"), true);
+  assert.equal(isPriceAggregatorUrl("https://www.superstep.com.tr/urun/adidas-superstar-ii/ki5010/"), false);
+
+  // 2. Exact Cimri stale snippet from user screenshot MUST be rejected
+  const cimriItem = {
+    title: "Adidas Samba OG B75807 Siyah Erkek Spor Ayakkabı",
+    link: "https://www.cimri.com/spor-ayakkabi/en-ucuz-adidas-samba-og-b75807,a12345",
+    snippet: "12 satıcı arasındaki en ucuz Adidas Samba OG Günlük Spor Ayakkabı fiyatı, 20.11.2026 tarihinde 1.399,00 TL. Şu anki fiyat, son 3 ayın en yüksek fiyatıdır.",
+  };
+  assert.equal(extractOrganicPriceInfo(cimriItem).price, null);
+
+  // Even on a regular store domain, a historical dated price sentence MUST NOT be extracted as live price
+  const datedSnippet = {
+    title: "Adidas Samba OG B75807",
+    link: "https://www.trendyol.com/adidas/samba-og-b75807-p-999999",
+    snippet: "Adidas Samba OG fiyatı 20.11.2026 tarihinde 1.399,00 TL idi.",
+  };
+  assert.equal(extractOrganicPriceInfo(datedSnippet).price, null);
+
+  // Live-verified price overrides stale Google snippet price
+  const liveOverridden = {
+    title: "Adidas Superstar II",
+    link: "https://www.superstep.com.tr/urun/adidas-superstar-ii/ki5010/",
+    snippet: "Eski fiyat 1.399,00 TL",
+    _liveVerifiedPrice: 4424,
+  };
+  const verifiedInfo = extractOrganicPriceInfo(liveOverridden);
+  assert.equal(verifiedInfo.price, 4424);
+  assert.equal(verifiedInfo.source, "live_verified");
+
+  // buildTurkeySearchResponse MUST completely exclude Cimri aggregator links
+  const built = buildTurkeySearchResponse(
+    "adidas samba",
+    [
+      cimriItem,
+      {
+        title: "Adidas Samba OG B75807 Siyah - Trendyol",
+        link: "https://www.trendyol.com/adidas/samba-og-b75807-p-777777",
+        price: 3083.46,
+        snippet: "Adidas Samba OG B75807 3.083,46 TL Ücretsiz Kargo",
+      },
+    ],
+    [],
+    "Google Türkiye (Serper)",
+    "serper"
+  );
+  assert.equal(built.products.some((p) => p.externalUrl?.includes("cimri.com")), false);
+  assert.equal(built.products.some((p) => p.externalUrl?.includes("trendyol.com") && p.lowestPrice === 3083.46), true);
+
+  // 3. mergeLiveAndSerperResults prefers live checkout price & drops extreme stale unverified low outliers
+  const merged = mergeLiveAndSerperResults(
+    {
+      provider: "Google Türkiye (Serper)",
+      products: [
+        {
+          id: "s1",
+          title: "Adidas Samba OG",
+          externalUrl: "https://www.superstep.com.tr/urun/adidas-samba/b75807/",
+          lowestPrice: 1399,
+          priceVerified: false,
+          isAccessory: false,
+        },
+        {
+          id: "s2",
+          title: "Adidas Samba OG Stale Snippet",
+          externalUrl: "https://www.trendyol.com/adidas/samba-og-p-123456",
+          lowestPrice: 1399,
+          priceVerified: false,
+          isAccessory: false,
+        },
+        {
+          id: "s3",
+          title: "Adidas Samba OG Realistic",
+          externalUrl: "https://www.trendyol.com/adidas/samba-og-p-654321",
+          lowestPrice: 3899,
+          priceVerified: false,
+          isAccessory: false,
+        },
+      ],
+    },
+    {
+      provider: "SuperStep, FashFed",
+      products: [
+        { id: "l1", title: "Adidas Samba OG", externalUrl: "https://www.superstep.com.tr/urun/adidas-samba/b75807/", lowestPrice: 4424, priceVerified: true, isAccessory: false },
+        { id: "l2", title: "Adidas Gazelle", externalUrl: "https://www.fashfed.com/urun/adidas-gazelle/bb5476/", lowestPrice: 4299, priceVerified: true, isAccessory: false },
+        { id: "l3", title: "Adidas Spezial", externalUrl: "https://www.intersport.com.tr/urun/adidas-spezial/bd7633/", lowestPrice: 4599, priceVerified: true, isAccessory: false },
+      ],
+    }
+  );
+  // Duplicate SuperStep URL must use live 4424 TL, NOT stale 1399 TL
+  const ssEntries = merged.products.filter((p) => p.externalUrl?.includes("superstep.com.tr"));
+  assert.equal(ssEntries.length, 1);
+  assert.equal(ssEntries[0].lowestPrice, 4424);
+  // Extreme stale 1399 TL unverified snippet (<45% of 4424 TL live median) must be filtered out, while realistic 3899 TL stays
+  assert.equal(merged.products.some((p) => p.id === "s2"), false);
+  assert.equal(merged.products.some((p) => p.id === "s3"), true);
+
+  // 4. Concise delivery labels (no giant raw meta descriptions)
+  assert.equal(
+    parseDeliverySpeed("12 satıcı arasındaki en ucuz Adidas Samba OG fiyatı bugün güncellendi ve son 3 ayın en yüksek fiyatıdır.").label,
+    "Aynı gün kargo"
+  );
+
+  // 5. Live checkout price verification against a real Turkish store product page
+  const liveCheck = await fetchLiveProductPrice("https://www.superstep.com.tr/urun/adidas-superstar-ii-erkek-kahverengi-spor-ayakkabi/ki5010/");
+  if (liveCheck) {
+    assert.ok(liveCheck.price === null || liveCheck.price > 500);
+  }
+});
+
 
 
 
