@@ -798,3 +798,84 @@ export function analyzePriceHistory(rawHistory, currentNetPrice, fallbackHistori
   };
 }
 
+/**
+ * Classifies a product card's price relative to the comparable query market median
+ * ("🔥 Piyasa Altı", "⚖️ Normal", "📈 Yüksek").
+ */
+export function classifyCardPricePosition(price, medianPrice) {
+  if (typeof price !== "number" || price <= 0 || typeof medianPrice !== "number" || medianPrice <= 0) {
+    return null;
+  }
+  const diffPct = Math.round(((price - medianPrice) / medianPrice) * 100);
+  // Protect against extreme suspiciously-low anomalies (< 45% of median) being praised as "Piyasa Altı"
+  if (price < medianPrice * 0.45) {
+    return null;
+  }
+  if (price <= medianPrice * 0.85) {
+    return {
+      tier: "below",
+      label: "🔥 Piyasa Altı",
+      diffPct,
+      note: `Piyasa medyanının %${Math.abs(diffPct)} altında`,
+    };
+  }
+  if (price >= medianPrice * 1.25) {
+    return {
+      tier: "above",
+      label: "📈 Yüksek",
+      diffPct,
+      note: `Piyasa medyanının %${diffPct} üzerinde`,
+    };
+  }
+  return {
+    tier: "normal",
+    label: "⚖️ Normal",
+    diffPct,
+    note: "Piyasa ortalaması bandında",
+  };
+}
+
+/**
+ * Annotates comparable retail non-accessory search cards with a quick market price position badge
+ * whenever at least 4 comparable priced items exist.
+ */
+export function annotateSearchPricePositions(products) {
+  if (!Array.isArray(products) || !products.length) return products || [];
+  const comparablePrices = products
+    .filter(
+      (p) =>
+        p &&
+        !p.isAccessory &&
+        !p.isListingPage &&
+        !p.isSecondHand &&
+        p.badge !== "Tüm Mağazalar" &&
+        typeof p.lowestPrice === "number" &&
+        p.lowestPrice > 0
+    )
+    .map((p) => p.lowestPrice)
+    .sort((a, b) => a - b);
+
+  if (comparablePrices.length < 4) return products;
+  const marketMedian = quantile(comparablePrices, 0.5);
+  if (!marketMedian || marketMedian <= 0) return products;
+
+  return products.map((p) => {
+    if (
+      !p ||
+      p.isAccessory ||
+      p.isListingPage ||
+      p.isSecondHand ||
+      p.badge === "Tüm Mağazalar" ||
+      typeof p.lowestPrice !== "number" ||
+      p.lowestPrice <= 0
+    ) {
+      return p;
+    }
+    return {
+      ...p,
+      pricePosition: classifyCardPricePosition(p.lowestPrice, marketMedian),
+    };
+  });
+}
+
+

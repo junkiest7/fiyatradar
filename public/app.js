@@ -41,7 +41,50 @@ const DEFAULT_USER_PREFS = {
   defaultFreeShippingOnly: false,
   installmentMonths: 3,
   installmentRate: 0,
+  favoriteStores: [],
+  hiddenStores: [],
 };
+
+const KNOWN_TR_STORES = [
+  "Trendyol",
+  "Hepsiburada",
+  "Amazon Türkiye",
+  "SuperStep",
+  "FashFed",
+  "Intersport",
+  "Beymen",
+  "D&R",
+  "Migros",
+  "MediaMarkt",
+  "Teknosa",
+  "Vatan Bilgisayar",
+  "n11",
+  "Pazarama",
+  "idefix",
+  "Sportive",
+  "Sporjinal",
+  "Koton",
+  "Tefal Türkiye",
+  "Zara",
+  "Stradivarius",
+  "FLO",
+  "Boyner",
+];
+
+function sanitizeStorePrefList(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const item of list) {
+    const clean = String(item || "").trim();
+    if (!clean) continue;
+    const key = clean.toLocaleLowerCase("tr-TR");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(clean);
+  }
+  return out;
+}
 
 function loadUserPrefs() {
   try {
@@ -53,10 +96,17 @@ function loadUserPrefs() {
         : savedTheme === "light" || savedTheme === "dark"
           ? savedTheme
           : "system";
+    const favoriteStores = sanitizeStorePrefList(raw.favoriteStores);
+    const favKeys = new Set(favoriteStores.map((s) => s.toLocaleLowerCase("tr-TR")));
+    const hiddenStores = sanitizeStorePrefList(raw.hiddenStores).filter(
+      (s) => !favKeys.has(s.toLocaleLowerCase("tr-TR"))
+    );
     return {
       ...DEFAULT_USER_PREFS,
       ...raw,
       themeMode,
+      favoriteStores,
+      hiddenStores,
       installmentMonths: [1, 3, 6, 9, 12].includes(Number(raw.installmentMonths))
         ? Number(raw.installmentMonths)
         : DEFAULT_USER_PREFS.installmentMonths,
@@ -96,8 +146,11 @@ const state = {
     officialOnly: Boolean(initialPrefs.defaultAuthorizedOnly),
     freeShippingOnly: Boolean(initialPrefs.defaultFreeShippingOnly),
     store: "",
+    size: "",
     variantAttr: null, // { group: 'capacity'|'color'|'size'|'volume', value: string }
   },
+  storePrefTab: "favorite", // 'favorite' | 'hidden'
+  recentViewed: loadLocalRecentViewed(), // [{ url, title, image, lowestPrice, source, viewedAt }]
   isListening: false,
   pushSubscribed: false,
   pushBusy: false,
@@ -150,6 +203,14 @@ const els = {
   openScannerBtn: $("openScannerBtn"),
   suggestList: $("suggestList"),
   statusBanner: $("statusBanner"),
+  homeShowcase: $("homeShowcase"),
+  homeCategoryGrid: $("homeCategoryGrid"),
+  homeWatchlistBlock: $("homeWatchlistBlock"),
+  homeWatchlistStrip: $("homeWatchlistStrip"),
+  homeOpenWatchlistBtn: $("homeOpenWatchlistBtn"),
+  homeRecentBlock: $("homeRecentBlock"),
+  homeRecentStrip: $("homeRecentStrip"),
+  homeClearRecentBtn: $("homeClearRecentBtn"),
   viewSearch: $("viewSearch"),
   viewDetail: $("viewDetail"),
   viewCompare: $("viewCompare"),
@@ -160,6 +221,7 @@ const els = {
   fallbackNoticeBanner: $("fallbackNoticeBanner"),
   searchModeBar: $("searchModeBar"),
   quickFilterBar: $("quickFilterBar"),
+  sizeFilterBar: $("sizeFilterBar"),
   variantGroupBar: $("variantGroupBar"),
   secondHandPanel: $("secondHandPanel"),
   resultsHeading: $("resultsHeading"),
@@ -193,6 +255,11 @@ const els = {
   prefHideImporterRefurb: $("prefHideImporterRefurb"),
   prefAuthorizedOnly: $("prefAuthorizedOnly"),
   prefFreeShippingOnly: $("prefFreeShippingOnly"),
+  settingsStoreTabs: $("settingsStoreTabs"),
+  settingsStoreHint: $("settingsStoreHint"),
+  settingsStoreChips: $("settingsStoreChips"),
+  settingsStoreSummary: $("settingsStoreSummary"),
+  settingsResetStoresBtn: $("settingsResetStoresBtn"),
   prefInstallmentMonths: $("prefInstallmentMonths"),
   prefInstallmentRate: $("prefInstallmentRate"),
   settingsPushBox: $("settingsPushBox"),
@@ -381,6 +448,122 @@ function saveLocalCustomFolders() {
   } catch {
     // Ignore
   }
+}
+
+function loadLocalRecentViewed() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem("fiyatradar_recent_viewed") || "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((x) => x && typeof x.url === "string" && x.url && typeof x.title === "string" && x.title)
+      .slice(0, 12);
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalRecentViewed() {
+  try {
+    localStorage.setItem("fiyatradar_recent_viewed", JSON.stringify((state.recentViewed || []).slice(0, 12)));
+  } catch {
+    // Ignore
+  }
+}
+
+function recordRecentViewed(detail) {
+  if (!detail?.url || !detail?.title) return;
+  const price =
+    typeof detail.stats?.minNet === "number" && detail.stats.minNet > 0
+      ? detail.stats.minNet
+      : typeof detail.lowPrice === "number" && detail.lowPrice > 0
+        ? detail.lowPrice
+        : null;
+  const entry = {
+    url: detail.url,
+    title: detail.title,
+    image: detail.image || "",
+    lowestPrice: price,
+    source: detail.picks?.cheapestNet?.store || detail.offers?.[0]?.store?.platform || "",
+    viewedAt: new Date().toISOString(),
+  };
+  const rest = (state.recentViewed || []).filter((x) => x.url !== entry.url);
+  state.recentViewed = [entry, ...rest].slice(0, 12);
+  saveLocalRecentViewed();
+  renderHomeShowcase();
+}
+
+function normalizeStoreKey(name) {
+  return String(name || "")
+    .replace(/\.(com\.tr|com|net|org)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLocaleLowerCase("tr-TR");
+}
+
+function storeNamesMatch(candidate, target) {
+  const a = normalizeStoreKey(candidate);
+  const b = normalizeStoreKey(target);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.startsWith("amazon") && b.startsWith("amazon")) return true;
+  if (a.startsWith("tefal") && b.startsWith("tefal")) return true;
+  if (a.startsWith("vatan") && b.startsWith("vatan")) return true;
+  return a.includes(b) || b.includes(a);
+}
+
+function extractProductStoreNames(product) {
+  const raw = [];
+  if (product?.source) {
+    for (const part of String(product.source).split(/[,·|/]+/)) {
+      const clean = part.trim();
+      if (clean) raw.push(clean);
+    }
+  }
+  if (product?.badge && product.badge !== "Tüm Mağazalar") {
+    for (const part of String(product.badge).split(/[,·|/]+/)) {
+      const clean = part.trim();
+      if (clean && !/^\d+\s+mağaza$/i.test(clean)) raw.push(clean);
+    }
+  }
+  return [...new Set(raw)];
+}
+
+function isStoreInPrefList(storeName, prefList) {
+  if (!storeName || !Array.isArray(prefList) || !prefList.length) return false;
+  return prefList.some((pref) => storeNamesMatch(storeName, pref));
+}
+
+function productMatchesStorePrefs(product, prefList) {
+  if (!Array.isArray(prefList) || !prefList.length) return false;
+  const stores = extractProductStoreNames(product);
+  return stores.some((s) => isStoreInPrefList(s, prefList));
+}
+
+function productAllStoresHidden(product) {
+  const hidden = state.prefs?.hiddenStores || [];
+  if (!hidden.length) return false;
+  const stores = extractProductStoreNames(product);
+  if (!stores.length) return false;
+  return stores.every((s) => isStoreInPrefList(s, hidden));
+}
+
+function isFavoriteStoreProduct(product) {
+  return productMatchesStorePrefs(product, state.prefs?.favoriteStores || []);
+}
+
+function isFavoriteOffer(offer) {
+  const favs = state.prefs?.favoriteStores || [];
+  if (!favs.length) return false;
+  return (
+    isStoreInPrefList(offer?.store?.platform, favs) ||
+    isStoreInPrefList(offer?.store?.seller, favs)
+  );
+}
+
+function isHiddenOffer(offer) {
+  const hidden = state.prefs?.hiddenStores || [];
+  if (!hidden.length) return false;
+  return isStoreInPrefList(offer?.store?.platform, hidden);
 }
 
 function getAllWatchlistFolders() {
@@ -637,6 +820,76 @@ function updateWatchlistBadge() {
   }
 }
 
+// Home Showcase (Quick Categories + Watchlist Highlights + Recently Viewed)
+function renderHomeShowcase() {
+  if (!els.homeShowcase) return;
+
+  // 1. Watchlist highlights (target hits & price drops first)
+  if (els.homeWatchlistBlock && els.homeWatchlistStrip) {
+    const wl = [...(state.watchlist || [])];
+    wl.sort((a, b) => {
+      const aHit = a.targetReached ? 2 : a.priceDropPct > 0 ? 1 : 0;
+      const bHit = b.targetReached ? 2 : b.priceDropPct > 0 ? 1 : 0;
+      if (aHit !== bHit) return bHit - aHit;
+      return (b.priceDropPct || 0) - (a.priceDropPct || 0);
+    });
+    const topWl = wl.slice(0, 8);
+    if (topWl.length) {
+      els.homeWatchlistBlock.hidden = false;
+      els.homeWatchlistStrip.innerHTML = topWl
+        .map((w) => {
+          const pill = w.targetReached
+            ? `<span class="home-drop-pill">🎯 Hedef</span>`
+            : typeof w.priceDropPct === "number" && w.priceDropPct >= 2
+              ? `<span class="home-drop-pill">↓ %${Math.round(w.priceDropPct)}</span>`
+              : "";
+          return `
+            <button type="button" class="home-mini-card" data-home-url="${esc(w.url)}" data-home-title="${esc(w.title || "")}">
+              <div class="home-mini-media">
+                ${w.image ? `<img src="${esc(w.image)}" alt="${esc(w.title || "")}" loading="lazy" />` : `<span class="muted-text" style="font-size:0.72rem;">Görsel yok</span>`}
+              </div>
+              <div class="home-mini-title">${esc(w.title || "Takip Ürünü")}</div>
+              <div class="home-mini-price-row">
+                <span class="home-mini-price">${typeof w.last_net_price === "number" && w.last_net_price > 0 ? fmtTL(w.last_net_price) : "İncele"}</span>
+                ${pill}
+              </div>
+            </button>
+          `;
+        })
+        .join("");
+    } else {
+      els.homeWatchlistBlock.hidden = true;
+      els.homeWatchlistStrip.innerHTML = "";
+    }
+  }
+
+  // 2. Recently Viewed strip
+  if (els.homeRecentBlock && els.homeRecentStrip) {
+    const recent = (state.recentViewed || []).slice(0, 10);
+    if (recent.length) {
+      els.homeRecentBlock.hidden = false;
+      els.homeRecentStrip.innerHTML = recent
+        .map(
+          (r) => `
+          <button type="button" class="home-mini-card" data-home-url="${esc(r.url)}" data-home-title="${esc(r.title || "")}">
+            <div class="home-mini-media">
+              ${r.image ? `<img src="${esc(r.image)}" alt="${esc(r.title || "")}" loading="lazy" />` : `<span class="muted-text" style="font-size:0.72rem;">Görsel yok</span>`}
+            </div>
+            <div class="home-mini-title">${esc(r.title)}</div>
+            <div class="home-mini-price-row">
+              <span class="home-mini-price">${typeof r.lowestPrice === "number" && r.lowestPrice > 0 ? fmtTL(r.lowestPrice) : "İncele"}</span>
+            </div>
+          </button>
+        `
+        )
+        .join("");
+    } else {
+      els.homeRecentBlock.hidden = true;
+      els.homeRecentStrip.innerHTML = "";
+    }
+  }
+}
+
 // Navigation
 function switchView(view) {
   state.activeView = view;
@@ -656,6 +909,12 @@ function switchView(view) {
     } else {
       node.hidden = k !== view;
     }
+  }
+
+  const isEmptyHome = view === "search" && !state.searchData;
+  if (els.homeShowcase) {
+    els.homeShowcase.hidden = !isEmptyHome;
+    if (isEmptyHome) renderHomeShowcase();
   }
 
   document.querySelectorAll(".nav-tab, .mobile-tab").forEach((btn) => {
@@ -768,6 +1027,7 @@ async function performSearch(query, opts = {}) {
 
     if (data.directProduct && data.detail) {
       state.currentDetail = mergePersonalPriceHistory(data.detail);
+      recordRecentViewed(state.currentDetail);
       switchView("detail");
       renderDetailView();
       return;
@@ -797,6 +1057,7 @@ async function performSearch(query, opts = {}) {
       officialOnly: Boolean(state.prefs.defaultAuthorizedOnly && hasOfficial),
       freeShippingOnly: Boolean(state.prefs.defaultFreeShippingOnly && hasFreeShip),
       store: "",
+      size: "",
       variantAttr: null,
     };
 
@@ -871,7 +1132,8 @@ function getRetailBaseProducts() {
 function getFilteredSearchProducts() {
   const all = getRetailBaseProducts();
   const f = state.searchFilters;
-  return all.filter((p) => {
+  const filtered = all.filter((p) => {
+    if (productAllStoresHidden(p)) return false;
     if (f.hideAccessories && p.isAccessory) return false;
     if (f.hideListings && p.isListingPage) return false;
     if (f.pricedOnly && !(typeof p.lowestPrice === "number" && p.lowestPrice > 0)) return false;
@@ -881,12 +1143,27 @@ function getFilteredSearchProducts() {
       const storeLabel = (p.badge || p.source || "").toLocaleLowerCase("tr-TR");
       if (storeLabel !== f.store.toLocaleLowerCase("tr-TR")) return false;
     }
+    if (f.size) {
+      if (!Array.isArray(p.availableSizes) || !p.availableSizes.includes(f.size)) return false;
+    }
     if (f.variantAttr) {
       const { group, value } = f.variantAttr;
       if (p.variantAttrs?.[group] !== value) return false;
     }
     return true;
   });
+
+  // Boost user's favorite stores cleanly to the top (preserving relative order)
+  if ((state.prefs?.favoriteStores || []).length > 0) {
+    const favs = [];
+    const rest = [];
+    for (const p of filtered) {
+      if (isFavoriteStoreProduct(p)) favs.push(p);
+      else rest.push(p);
+    }
+    return [...favs, ...rest];
+  }
+  return filtered;
 }
 
 function getCombinedSecondHandItems() {
@@ -1280,7 +1557,13 @@ function renderQuickFilterBar() {
     .slice(0, 6);
 
   const chips = [];
-  const anyActive = f.pricedOnly || f.officialOnly || f.freeShippingOnly || Boolean(f.store) || Boolean(f.variantAttr);
+  const anyActive =
+    f.pricedOnly ||
+    f.officialOnly ||
+    f.freeShippingOnly ||
+    Boolean(f.store) ||
+    Boolean(f.size) ||
+    Boolean(f.variantAttr);
   chips.push(
     `<button type="button" class="filter-chip ${!anyActive && !f.hideAccessories && !f.hideListings ? "active" : ""}" data-qfilter="reset">Tümü (${all.length})</button>`
   );
@@ -1320,6 +1603,68 @@ function renderQuickFilterBar() {
   els.quickFilterBar.innerHTML = chips.join("");
 }
 
+const CLOTHING_SIZE_ORDER = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "2XL", "3XL", "4XL"];
+
+function compareSizeLabels(a, b) {
+  const numA = Number.parseFloat(String(a).replace(",", "."));
+  const numB = Number.parseFloat(String(b).replace(",", "."));
+  const aIsNum = Number.isFinite(numA) && /^\d+(?:[.,]\d+)?$/.test(String(a));
+  const bIsNum = Number.isFinite(numB) && /^\d+(?:[.,]\d+)?$/.test(String(b));
+  if (aIsNum && bIsNum) return numA - numB;
+  if (aIsNum) return -1;
+  if (bIsNum) return 1;
+  const idxA = CLOTHING_SIZE_ORDER.indexOf(String(a).toUpperCase());
+  const idxB = CLOTHING_SIZE_ORDER.indexOf(String(b).toUpperCase());
+  if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+  if (idxA !== -1) return -1;
+  if (idxB !== -1) return 1;
+  return String(a).localeCompare(String(b), "tr-TR");
+}
+
+function renderSizeFilterBar() {
+  if (!els.sizeFilterBar) return;
+  const all = getRetailBaseProducts();
+  const f = state.searchFilters;
+  const pool = all.filter(
+    (p) =>
+      !productAllStoresHidden(p) &&
+      (!f.hideAccessories || !p.isAccessory) &&
+      (!f.hideListings || !p.isListingPage) &&
+      Array.isArray(p.availableSizes) &&
+      p.availableSizes.length > 0
+  );
+
+  const counts = new Map();
+  for (const p of pool) {
+    const uniq = new Set(p.availableSizes);
+    for (const sz of uniq) {
+      counts.set(sz, (counts.get(sz) || 0) + 1);
+    }
+  }
+
+  if (counts.size < 2) {
+    els.sizeFilterBar.hidden = true;
+    els.sizeFilterBar.innerHTML = "";
+    return;
+  }
+
+  const sortedSizes = [...counts.entries()].sort((a, b) => compareSizeLabels(a[0], b[0]));
+  const isShoeHeavy = sortedSizes.some(([sz]) => /^\d{2}(?:,\d)?$/.test(sz));
+  const barLabel = isShoeHeavy ? "Stoktaki Numara:" : "Stoktaki Beden:";
+
+  const pills = [
+    `<span class="size-filter-label">${barLabel}</span>`,
+    `<button type="button" class="size-chip ${!f.size ? "active" : ""}" data-size-filter="">Tümü</button>`,
+    ...sortedSizes.map(
+      ([sz, count]) =>
+        `<button type="button" class="size-chip ${f.size === sz ? "active" : ""}" data-size-filter="${esc(sz)}">${esc(sz)}<span>(${count})</span></button>`
+    ),
+  ];
+
+  els.sizeFilterBar.hidden = false;
+  els.sizeFilterBar.innerHTML = pills.join("");
+}
+
 function renderSearchResults() {
   const data = state.searchData;
   if (!data) return;
@@ -1356,6 +1701,7 @@ function renderSearchResults() {
 
   if (state.searchMode === "secondhand") {
     if (els.quickFilterBar) els.quickFilterBar.hidden = true;
+    if (els.sizeFilterBar) els.sizeFilterBar.hidden = true;
     if (els.variantGroupBar) els.variantGroupBar.hidden = true;
     if (els.resultsGrid) els.resultsGrid.hidden = true;
     if (els.secondHandPanel) els.secondHandPanel.hidden = false;
@@ -1373,6 +1719,7 @@ function renderSearchResults() {
   if (els.resultsGrid) els.resultsGrid.hidden = false;
 
   renderQuickFilterBar();
+  renderSizeFilterBar();
   renderVariantGroupBar();
 
   const visibleProducts = getFilteredSearchProducts();
@@ -1382,12 +1729,15 @@ function renderSearchResults() {
   els.resultsSubmeta.textContent = `${visibleProducts.length} / ${retailBaseCount} sıfır ürün listelendi${providerTag}${data.cached ? " · Önbellek" : " · Canlı"}`;
 
   if (!visibleProducts.length) {
+    const hasHiddenPrefs = (state.prefs?.hiddenStores || []).length > 0;
     els.resultsGrid.innerHTML = `
       <div class="empty-state" style="grid-column:1/-1;">
         <h3>Eşleşen ürün bulunamadı</h3>
         <p>${
           data.products.length > 0
-            ? "Seçili mağaza, kategori veya aksesuar filtresi sonuçları gizledi. Yukarıdaki 'Tümü' çipine dokunarak tüm sonuçları görebilirsiniz."
+            ? hasHiddenPrefs
+              ? "Seçili numara/beden, filtreler veya Ayarlar'daki gizlenen mağaza tercihleriniz sonuçları gizledi. Yukarıdaki 'Tümü' çipine dokunabilir veya Ayarlar → Mağaza Tercihleri'ni kontrol edebilirsiniz."
+              : "Seçili numara/beden, mağaza veya aksesuar filtresi sonuçları gizledi. Yukarıdaki 'Tümü' çipine dokunarak tüm sonuçları görebilirsiniz."
             : "Bu arama için canlı mağazalarda eşleşen ürün bulunamadı. Marka + kısa model adı (örn. 'adidas samba', 'dior sauvage', 'airpods 4') yazarak tekrar deneyebilirsiniz."
         }</p>
       </div>`;
@@ -1402,8 +1752,16 @@ function renderSearchResults() {
       const hasDirectProductLink = Boolean(p.externalUrl && !p.isListingPage && !isCatalogOnly);
       const imgIsFavicon = isFaviconUrl(p.image);
       const colorLabel = p.variantAttrs?.color || "";
+      const isFavStore = isFavoriteStoreProduct(p);
+      const sizes = Array.isArray(p.availableSizes) ? p.availableSizes : [];
+      const sizePreview =
+        sizes.length > 0
+          ? sizes.length > 6
+            ? `${sizes.slice(0, 6).join(" · ")} +${sizes.length - 6}`
+            : sizes.join(" · ")
+          : "";
       return `
-        <article class="product-card" data-url="${esc(p.url)}">
+        <article class="product-card ${isFavStore ? "is-fav-store" : ""}" data-url="${esc(p.url)}">
           <div class="product-card-media ${imgIsFavicon ? "is-favicon-wrap" : ""}" data-action="open-detail">
             ${
               p.image
@@ -1412,7 +1770,9 @@ function renderSearchResults() {
             }
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:5px;align-items:center;">
+            ${isFavStore ? `<span class="mini-badge pos-below" title="Ayarlar'da öncelikli seçtiğiniz mağaza">⭐ Favori</span>` : ""}
             ${p.badge ? `<span class="offer-pill">${esc(p.badge)}</span>` : ""}
+            ${p.pricePosition ? `<span class="mini-badge pos-${esc(p.pricePosition.tier)}" title="${esc(p.pricePosition.note || "")}">${esc(p.pricePosition.label)}</span>` : ""}
             ${colorLabel ? `<span class="color-tag">${renderColorSwatch(colorLabel)}${esc(colorLabel)}</span>` : ""}
             ${p.trustShield?.condition === "refurbished" ? `<span class="mini-badge warn">♻ Yenilenmiş</span>` : ""}
             ${p.trustShield?.condition === "demo" ? `<span class="mini-badge trap">⚠ Teşhir</span>` : ""}
@@ -1423,6 +1783,7 @@ function renderSearchResults() {
             ${p.isAccessory ? `<span class="mini-badge trap">Aksesuar</span>` : ""}
           </div>
           <h3 class="product-card-title" data-action="open-detail" title="${esc(p.title)}">${esc(p.title)}</h3>
+          ${sizePreview ? `<div class="card-sizes-line" title="Stoktaki beden/numaralar: ${esc(sizes.join(", "))}">Stokta: ${esc(sizePreview)}</div>` : ""}
           ${p.unitInfo ? `<div class="unit-pill" title="Otomatik birim maliyet (${esc(p.unitInfo.rawMatch)})">${esc(p.unitInfo.formatted)}</div>` : ""}
           <div class="product-card-pricing">
             <span class="price-main">${p.lowestPrice ? fmtTL(p.lowestPrice) : p.isListingPage ? "Kategoride Gör" : "Mağazada Gör"}</span>
@@ -1470,6 +1831,7 @@ async function openProductDetail(url, refresh = false, fallbackTitle = "") {
     setStatus(null);
 
     state.currentDetail = mergePersonalPriceHistory(detail);
+    recordRecentViewed(state.currentDetail);
     state.chartRange = "all";
     state.offerSort = "net_asc";
     state.installment = {
@@ -2305,6 +2667,12 @@ function renderOffersTableBody() {
   const q = state.offerFilters.storeSearch.trim().toLocaleLowerCase("tr-TR");
   let list = [...(d.offers || [])];
 
+  // Exclude user-hidden stores ONLY if at least 1 offer remains
+  if ((state.prefs?.hiddenStores || []).length > 0 && list.length > 1) {
+    const visibleAfterHide = list.filter((o) => !isHiddenOffer(o));
+    if (visibleAfterHide.length > 0) list = visibleAfterHide;
+  }
+
   if (state.offerFilters.freeShippingOnly) {
     list = list.filter((o) => o.shipping?.isFree);
   }
@@ -2341,6 +2709,17 @@ function renderOffersTableBody() {
     list.sort((a, b) => a.netPrice - b.netPrice);
   }
 
+  // Gently prioritize favorite stores while preserving relative sort within each group
+  if ((state.prefs?.favoriteStores || []).length > 0 && list.length > 1) {
+    const favs = [];
+    const rest = [];
+    for (const o of list) {
+      if (isFavoriteOffer(o)) favs.push(o);
+      else rest.push(o);
+    }
+    list = [...favs, ...rest];
+  }
+
   if (!list.length) {
     tbody.innerHTML = `<tr><td colspan="${d.unitInfo ? 10 : 9}" style="text-align:center;padding:28px;" class="muted-text">Filtre kriterlerinize uyan mağaza teklifi bulunamadı.</td></tr>`;
     if (mobileList) {
@@ -2352,6 +2731,7 @@ function renderOffersTableBody() {
   tbody.innerHTML = list
     .map((o, i) => {
       const scoreClass = o.dealScore >= 75 ? "" : o.dealScore >= 50 ? "mid" : "low";
+      const isFav = isFavoriteOffer(o);
       const rowClass = o.rankByNet === 1 ? "row-best" : o.isOutlier ? "row-outlier" : "";
       return `
         <tr class="${rowClass}">
@@ -2369,6 +2749,7 @@ function renderOffersTableBody() {
                   : ""
               }
               <div class="row-badges">
+                ${isFav ? `<span class="mini-badge pos-below">⭐ Öncelikli</span>` : ""}
                 ${o.store.isOfficialSeller ? `<span class="mini-badge official">Yetkili / Resmi</span>` : ""}
                 ${(o.badges || []).map((b) => `<span class="mini-badge ${esc(b.type)}">${esc(b.label)}</span>`).join("")}
               </div>
@@ -2416,6 +2797,7 @@ function renderOffersTableBody() {
     mobileList.innerHTML = list
       .map((o, i) => {
         const scoreClass = o.dealScore >= 75 ? "" : o.dealScore >= 50 ? "mid" : "low";
+        const isFav = isFavoriteOffer(o);
         const rowClass = o.rankByNet === 1 ? "row-best" : o.isOutlier ? "row-outlier" : "";
         return `
           <article class="mobile-offer-card ${rowClass}">
@@ -2461,8 +2843,9 @@ function renderOffersTableBody() {
             </div>
 
             ${
-              o.store.isOfficialSeller || (o.badges && o.badges.length)
+              isFav || o.store.isOfficialSeller || (o.badges && o.badges.length)
                 ? `<div class="row-badges">
+                    ${isFav ? `<span class="mini-badge pos-below">⭐ Öncelikli</span>` : ""}
                     ${o.store.isOfficialSeller ? `<span class="mini-badge official">Yetkili / Resmi</span>` : ""}
                     ${(o.badges || []).map((b) => `<span class="mini-badge ${esc(b.type)}">${esc(b.label)}</span>`).join("")}
                   </div>`
@@ -2995,10 +3378,12 @@ async function loadWatchlist() {
 
     state.watchlist = items;
     updateWatchlistBadge();
+    renderHomeShowcase();
     if (state.activeView === "watchlist") renderWatchlistView();
   } catch {
     state.watchlist = loadLocalWatchlist();
     updateWatchlistBadge();
+    renderHomeShowcase();
     if (state.activeView === "watchlist") renderWatchlistView();
   }
 }
@@ -3432,6 +3817,32 @@ function bindEvents() {
     if (state.lastQuery) performSearch(state.lastQuery);
   });
 
+  // Home Showcase (Quick Categories + Watchlist Highlights + Recently Viewed)
+  els.homeCategoryGrid?.addEventListener("click", (e) => {
+    const card = e.target.closest("[data-home-query]");
+    if (card?.dataset.homeQuery) performSearch(card.dataset.homeQuery);
+  });
+
+  els.homeOpenWatchlistBtn?.addEventListener("click", () => {
+    switchView("watchlist");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  });
+
+  els.homeClearRecentBtn?.addEventListener("click", () => {
+    state.recentViewed = [];
+    saveLocalRecentViewed();
+    renderHomeShowcase();
+    showToast("Son incelenenler temizlendi.");
+  });
+
+  const handleHomeMiniCardClick = (e) => {
+    const card = e.target.closest("[data-home-url]");
+    if (!card?.dataset.homeUrl) return;
+    openProductDetail(card.dataset.homeUrl, false, card.dataset.homeTitle || "");
+  };
+  els.homeWatchlistStrip?.addEventListener("click", handleHomeMiniCardClick);
+  els.homeRecentStrip?.addEventListener("click", handleHomeMiniCardClick);
+
   // Quick store / accessory / free-shipping filter chips
   els.quickFilterBar?.addEventListener("click", (e) => {
     const qfBtn = e.target.closest("[data-qfilter]");
@@ -3445,6 +3856,7 @@ function bindEvents() {
           officialOnly: false,
           freeShippingOnly: false,
           store: "",
+          size: "",
           variantAttr: null,
         };
       } else if (key in state.searchFilters) {
@@ -3460,6 +3872,15 @@ function bindEvents() {
       state.searchFilters.store = state.searchFilters.store === chosen ? "" : chosen;
       renderSearchResults();
     }
+  });
+
+  // Real In-Stock Shoe Number / Clothing Size Filter Bar clicks
+  els.sizeFilterBar?.addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-size-filter]");
+    if (!chip) return;
+    const chosen = chip.dataset.sizeFilter || "";
+    state.searchFilters.size = state.searchFilters.size === chosen ? "" : chosen;
+    renderSearchResults();
   });
 
   // Smart Capacity / Color / Size / Volume Variant Group Bar clicks
@@ -4052,6 +4473,59 @@ function bindEvents() {
     if (state.currentDetail && state.activeView === "detail") renderDetailView();
     showToast(`Varsayılan vade oranı: %${rate}`);
   });
+
+  // Settings: Favorite & Hidden Store Preferences
+  els.settingsStoreTabs?.addEventListener("click", (e) => {
+    const tab = e.target.closest("[data-store-tab]");
+    if (!tab) return;
+    const mode = tab.dataset.storeTab === "hidden" ? "hidden" : "favorite";
+    state.storePrefTab = mode;
+    renderSettingsStorePrefs();
+  });
+
+  els.settingsStoreChips?.addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-pref-store]");
+    if (!chip) return;
+    const storeName = chip.dataset.prefStore;
+    if (!storeName) return;
+
+    let favs = [...(state.prefs.favoriteStores || [])];
+    let hidden = [...(state.prefs.hiddenStores || [])];
+    const sameStore = (s) => storeNamesMatch(s, storeName);
+
+    if (state.storePrefTab === "favorite") {
+      if (favs.some(sameStore)) {
+        favs = favs.filter((s) => !sameStore(s));
+        showToast(`${storeName} öncelikli mağazalardan çıkarıldı.`);
+      } else {
+        favs.push(storeName);
+        hidden = hidden.filter((s) => !sameStore(s));
+        showToast(`⭐ ${storeName} öncelikli mağazalara eklendi.`);
+      }
+    } else {
+      if (hidden.some(sameStore)) {
+        hidden = hidden.filter((s) => !sameStore(s));
+        showToast(`${storeName} tekrar gösterilecek.`);
+      } else {
+        hidden.push(storeName);
+        favs = favs.filter((s) => !sameStore(s));
+        showToast(`🚫 ${storeName} arama sonuçlarından gizlenecek.`);
+      }
+    }
+
+    saveUserPrefs({ favoriteStores: favs, hiddenStores: hidden });
+    renderSettingsStorePrefs();
+    if (state.searchData && state.activeView === "search") renderSearchResults();
+    if (state.currentDetail && state.activeView === "detail") renderOffersTableBody();
+  });
+
+  els.settingsResetStoresBtn?.addEventListener("click", () => {
+    saveUserPrefs({ favoriteStores: [], hiddenStores: [] });
+    renderSettingsStorePrefs();
+    if (state.searchData && state.activeView === "search") renderSearchResults();
+    if (state.currentDetail && state.activeView === "detail") renderOffersTableBody();
+    showToast("Mağaza tercihleri sıfırlandı.");
+  });
 }
 
 // ============================================================================
@@ -4341,6 +4815,72 @@ async function initPushClient() {
   }
 }
 
+function getStorePrefCatalog() {
+  const seen = new Set();
+  const list = [];
+  const push = (name) => {
+    const clean = String(name || "").trim();
+    if (!clean || clean === "Tüm Mağazalar" || clean === "Akakçe" || /^\d+\s+mağaza$/i.test(clean)) return;
+    const key = normalizeStoreKey(clean);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    list.push(clean);
+  };
+  for (const s of KNOWN_TR_STORES) push(s);
+  for (const s of state.prefs.favoriteStores || []) push(s);
+  for (const s of state.prefs.hiddenStores || []) push(s);
+  for (const p of state.searchData?.products || []) {
+    for (const s of extractProductStoreNames(p)) push(s);
+  }
+  return list;
+}
+
+function renderSettingsStorePrefs() {
+  const mode = state.storePrefTab === "hidden" ? "hidden" : "favorite";
+  const favs = state.prefs.favoriteStores || [];
+  const hidden = state.prefs.hiddenStores || [];
+
+  els.settingsStoreTabs?.querySelectorAll("[data-store-tab]").forEach((btn) => {
+    const active = btn.dataset.storeTab === mode;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", String(active));
+  });
+
+  if (els.settingsStoreHint) {
+    els.settingsStoreHint.textContent =
+      mode === "favorite"
+        ? "Seçtiğiniz mağazalar arama sonuçlarında ve teklif tablosunda ⭐ ile en üstte öne çıkarılır."
+        : "Seçtiğiniz mağazalar arama sonuçlarından ve çoklu teklif tablosundan otomatik olarak gizlenir.";
+  }
+
+  if (els.settingsStoreChips) {
+    const catalog = getStorePrefCatalog();
+    els.settingsStoreChips.innerHTML = catalog
+      .map((storeName) => {
+        const isFav = isStoreInPrefList(storeName, favs);
+        const isHid = isStoreInPrefList(storeName, hidden);
+        const cls = isFav ? "is-fav" : isHid ? "is-hidden" : "";
+        const prefix = isFav ? "⭐ " : isHid ? "🚫 " : "";
+        return `<button type="button" class="store-pref-chip ${cls}" data-pref-store="${esc(storeName)}">${prefix}${esc(storeName)}</button>`;
+      })
+      .join("");
+  }
+
+  if (els.settingsStoreSummary) {
+    if (!favs.length && !hidden.length) {
+      els.settingsStoreSummary.textContent = "Henüz mağaza tercihi seçilmedi.";
+    } else {
+      const parts = [];
+      if (favs.length) parts.push(`⭐ ${favs.length} öncelikli`);
+      if (hidden.length) parts.push(`🚫 ${hidden.length} gizli`);
+      els.settingsStoreSummary.textContent = parts.join(" · ");
+    }
+  }
+  if (els.settingsResetStoresBtn) {
+    els.settingsResetStoresBtn.hidden = favs.length === 0 && hidden.length === 0;
+  }
+}
+
 function syncSettingsModalUI() {
   const p = state.prefs;
   els.settingsThemeSegmented?.querySelectorAll("[data-theme-pref]").forEach((btn) => {
@@ -4353,6 +4893,7 @@ function syncSettingsModalUI() {
   if (els.prefFreeShippingOnly) els.prefFreeShippingOnly.checked = Boolean(p.defaultFreeShippingOnly);
   if (els.prefInstallmentMonths) els.prefInstallmentMonths.value = String(p.installmentMonths);
   if (els.prefInstallmentRate) els.prefInstallmentRate.value = String(p.installmentRate);
+  renderSettingsStorePrefs();
 }
 
 async function renderSettingsPushBox() {
@@ -4505,6 +5046,7 @@ bindEvents();
 initPwa();
 updateCompareBadges();
 updateCartBadges();
+renderHomeShowcase();
 loadWatchlist();
 initPushClient();
 handleLaunchUrl(window.location.href);

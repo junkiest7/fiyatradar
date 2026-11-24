@@ -14,13 +14,20 @@ import {
   suggestWatchlistFolder,
   transliterateTr,
 } from "../src/parsers.js";
-import { analyzeOffers, analyzePriceHistory, detectFakeDiscount } from "../src/analyzer.js";
+import {
+  analyzeOffers,
+  analyzePriceHistory,
+  annotateSearchPricePositions,
+  classifyCardPricePosition,
+  detectFakeDiscount,
+} from "../src/analyzer.js";
 import { getProductDetail, searchProducts } from "../src/scraper.js";
 import {
   buildSecondHandQuickLinks,
   buildTurkeySearchResponse,
   classifyStoreUrl,
   detectSecondHandCondition,
+  extractAkinonAvailableSizes,
   extractOrganicPriceInfo,
   fetchLiveProductPrice,
   getVirtualDetail,
@@ -34,6 +41,7 @@ import {
   resolveStoreFromUrl,
   searchOfficialFallback,
   searchSecondHandTurkey,
+  sortAvailableSizes,
 } from "../src/providers.js";
 import {
   getPushSubscriptions,
@@ -1218,6 +1226,73 @@ test("v13 Live Checkout Price Accuracy: blocks stale Cimri/Epey aggregator snipp
     assert.ok(liveCheck.price === null || liveCheck.price > 500);
   }
 });
+
+test("v17 Feature #2: extractAkinonAvailableSizes extracts real in-stock EU shoe/clothing sizes, skips out-of-stock & US sizes", async () => {
+  const akinonProduct = {
+    attributes: {
+      filterable_size: "42",
+      integration_beden: "8,5", // US size should be ignored when EU filterable_size exists
+    },
+    extra_data: {
+      variants: [
+        {
+          options: [
+            { is_selectable: true, in_stock: true, product: { attributes: { filterable_size: "43" } } },
+            { is_selectable: true, in_stock: true, product: { attributes: { filterable_size: "42.5" } } },
+            { is_selectable: true, in_stock: true, product: { attributes: { filterable_size: "41" } } },
+            { is_selectable: false, in_stock: false, product: { attributes: { filterable_size: "46" } } },
+          ],
+        },
+      ],
+    },
+  };
+  const sizes = extractAkinonAvailableSizes(akinonProduct);
+  assert.deepEqual(sizes, ["41", "42", "42,5", "43"]);
+
+  // Clothing size sorting
+  assert.deepEqual(sortAvailableSizes(["XL", "S", "M", "XS", "L", "2XL"]), ["XS", "S", "M", "L", "XL", "2XL"]);
+
+  // Live zero-key search for shoes exposes real availableSizes on Akinon products
+  const live = await searchOfficialFallback("adidas erkek ayakkabı");
+  assert.ok(
+    live.products.some((p) => Array.isArray(p.availableSizes) && p.availableSizes.length >= 2),
+    "Expected live Akinon shoe results to include real availableSizes"
+  );
+});
+
+test("v17 Feature #3: classifyCardPricePosition & annotateSearchPricePositions classify below/normal/above market prices safely", () => {
+  assert.equal(classifyCardPricePosition(3200, 4000)?.tier, "below");
+  assert.equal(classifyCardPricePosition(4000, 4000)?.tier, "normal");
+  assert.equal(classifyCardPricePosition(5200, 4000)?.tier, "above");
+  // Extreme <45% outlier is NOT falsely tagged as 'Piyasa Altı'
+  assert.equal(classifyCardPricePosition(1200, 4000), null);
+
+  // Too few comparable items (<4) should NOT annotate
+  const tooFew = annotateSearchPricePositions([
+    { id: "1", lowestPrice: 3000 },
+    { id: "2", lowestPrice: 4000 },
+    { id: "3", lowestPrice: 5000 },
+  ]);
+  assert.equal(tooFew.every((p) => !p.pricePosition), true);
+
+  // >=4 comparable non-accessory items annotate accurately while skipping accessories & second-hand
+  const annotated = annotateSearchPricePositions([
+    { id: "a", lowestPrice: 3100, isAccessory: false },
+    { id: "b", lowestPrice: 4000, isAccessory: false },
+    { id: "c", lowestPrice: 4100, isAccessory: false },
+    { id: "d", lowestPrice: 4200, isAccessory: false },
+    { id: "e", lowestPrice: 5500, isAccessory: false },
+    { id: "acc", lowestPrice: 120, isAccessory: true },
+    { id: "sh", lowestPrice: 1500, isSecondHand: true },
+  ]);
+  const byId = new Map(annotated.map((p) => [p.id, p]));
+  assert.equal(byId.get("a").pricePosition?.tier, "below");
+  assert.equal(byId.get("b").pricePosition?.tier, "normal");
+  assert.equal(byId.get("e").pricePosition?.tier, "above");
+  assert.equal(byId.get("acc").pricePosition, undefined);
+  assert.equal(byId.get("sh").pricePosition, undefined);
+});
+
 
 
 

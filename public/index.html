@@ -144,6 +144,57 @@
     <!-- Status / Error / Loading Banner -->
     <div id="statusBanner" class="status-banner" role="status" hidden></div>
 
+    <!-- HOME SHOWCASE: Quick Categories, Recently Viewed & Watchlist Drops -->
+    <section id="homeShowcase" class="home-showcase">
+      <div class="home-block">
+        <div class="home-block-header">
+          <h3>Popüler Kategoriler</h3>
+        </div>
+        <div class="home-cat-grid" id="homeCategoryGrid">
+          <button type="button" class="home-cat-card" data-home-query="adidas erkek ayakkabı">
+            <span class="home-cat-icon" aria-hidden="true">👟</span>
+            <span class="home-cat-label">Sneaker & Ayakkabı</span>
+          </button>
+          <button type="button" class="home-cat-card" data-home-query="apple airpods">
+            <span class="home-cat-icon" aria-hidden="true">📱</span>
+            <span class="home-cat-label">Elektronik & Apple</span>
+          </button>
+          <button type="button" class="home-cat-card" data-home-query="dior sauvage parfüm">
+            <span class="home-cat-icon" aria-hidden="true">✨</span>
+            <span class="home-cat-label">Parfüm & Kozmetik</span>
+          </button>
+          <button type="button" class="home-cat-card" data-home-query="tefal airfryer">
+            <span class="home-cat-icon" aria-hidden="true">🏠</span>
+            <span class="home-cat-label">Ev & Küçük Aletler</span>
+          </button>
+          <button type="button" class="home-cat-card" data-home-query="lavazza kahve 1 kg">
+            <span class="home-cat-icon" aria-hidden="true">🛒</span>
+            <span class="home-cat-label">Süpermarket</span>
+          </button>
+          <button type="button" class="home-cat-card" data-home-query="rayban güneş gözlüğü">
+            <span class="home-cat-icon" aria-hidden="true">🕶️</span>
+            <span class="home-cat-label">Gözlük & Moda</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="home-block" id="homeWatchlistBlock" hidden>
+        <div class="home-block-header">
+          <h3>Takip Listemden Öne Çıkanlar</h3>
+          <button type="button" id="homeOpenWatchlistBtn" class="home-link-btn">Tümünü Gör →</button>
+        </div>
+        <div class="home-card-strip" id="homeWatchlistStrip"></div>
+      </div>
+
+      <div class="home-block" id="homeRecentBlock" hidden>
+        <div class="home-block-header">
+          <h3>Son İncelediklerim</h3>
+          <button type="button" id="homeClearRecentBtn" class="home-link-btn">Temizle</button>
+        </div>
+        <div class="home-card-strip" id="homeRecentStrip"></div>
+      </div>
+    </section>
+
     <!-- VIEW 1: Search Results -->
     <section id="viewSearch" class="view-section" hidden>
       <div id="linkResolvedBanner" class="link-resolved-banner" hidden></div>
@@ -171,6 +222,9 @@
 
       <!-- Quick Store / Accessory / Free-Shipping Filter Chips -->
       <div id="quickFilterBar" class="quick-filter-bar" hidden></div>
+
+      <!-- Real In-Stock Shoe Number / Clothing Size Filter Bar -->
+      <div id="sizeFilterBar" class="size-filter-bar" hidden></div>
 
       <!-- Smart Capacity / Color / Size / Volume Variant Grouping Bar -->
       <div id="variantGroupBar" class="variant-group-bar" hidden></div>
@@ -522,7 +576,24 @@
         </div>
       </div>
 
-      <!-- 3. Taksit Hesaplayıcı Varsayılanı -->
+      <!-- 3. Mağaza Tercihleri (Favori & Gizlenecek Mağazalar) -->
+      <div class="settings-group">
+        <h4 class="settings-group-title">Mağaza Tercihleri</h4>
+        <div class="store-pref-tabs" id="settingsStoreTabs" role="tablist" aria-label="Mağaza Tercih Modu">
+          <button type="button" class="store-pref-tab active" data-store-tab="favorite" role="tab" aria-selected="true">⭐ Öncelikli Mağazalar</button>
+          <button type="button" class="store-pref-tab" data-store-tab="hidden" role="tab" aria-selected="false">🚫 Gizlenecek Mağazalar</button>
+        </div>
+        <p id="settingsStoreHint" class="muted-text" style="margin:0 0 10px;font-size:0.77rem;">
+          Seçtiğiniz mağazalar arama sonuçlarında ve teklif tablosunda öncelikli olarak öne çıkarılır.
+        </p>
+        <div id="settingsStoreChips" class="store-pref-chips"></div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:10px;">
+          <span id="settingsStoreSummary" class="muted-text" style="margin:0;font-size:0.75rem;"></span>
+          <button type="button" id="settingsResetStoresBtn" class="home-link-btn" hidden>Tercihleri Sıfırla</button>
+        </div>
+      </div>
+
+      <!-- 4. Taksit Hesaplayıcı Varsayılanı -->
       <div class="settings-group">
         <h4 class="settings-group-title">Taksit Hesaplayıcı Varsayılanı</h4>
 
@@ -554,13 +625,13 @@
         </div>
       </div>
 
-      <!-- 4. Bildirimler -->
+      <!-- 5. Bildirimler -->
       <div class="settings-group">
         <h4 class="settings-group-title">Fiyat Düşüşü Bildirimleri</h4>
         <div id="settingsPushBox" class="settings-push-box"></div>
       </div>
 
-      <!-- 5. Hakkında -->
+      <!-- 6. Hakkında -->
       <div class="settings-group" style="margin-bottom:0;">
         <h4 class="settings-group-title">Hakkında</h4>
         <div class="settings-about-row">
@@ -568,7 +639,7 @@
             <img src="/icons/icon-192.png?v=10" alt="" class="settings-about-icon" />
             <div class="settings-row-copy">
               <strong>FiyatRadar</strong>
-              <span>Sürüm 16 · Canlı Türkiye Fiyat Analizi</span>
+              <span>Sürüm 17 · Canlı Türkiye Fiyat Analizi</span>
             </div>
           </div>
           <span class="settings-push-status" id="settingsLiveStatus" style="font-size:0.78rem;">

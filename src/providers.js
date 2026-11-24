@@ -2411,6 +2411,98 @@ function extractModelStyleCode(code, title) {
   return "";
 }
 
+const CLOTHING_SIZE_ORDER = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "2XL", "3XL", "4XL", "STD"];
+
+function normalizeAvailableSize(raw) {
+  const s = String(raw || "").replace(/\s+/g, " ").trim().toUpperCase();
+  if (!s || s === "-" || s === "0" || s === "999" || s === "NONE" || s === "NULL") return "";
+
+  // Clothing letter sizes (XS, S, M, L, XL, XXL, 2XL, 3XL)
+  if (/^(XXS|XS|S|M|L|XL|XXL|2XL|3XL|4XL)$/.test(s)) {
+    return s === "XXL" ? "2XL" : s;
+  }
+
+  // EU shoe / waist numeric sizes (e.g. "42", "42,5", "42.5", "42 2/3" -> "42,5")
+  const euHalf = s.match(/^(\d{2})\s*(?:[.,]([05])|(?:1\/3|2\/3|1\/2))$/);
+  if (euHalf) {
+    const num = Number.parseInt(euHalf[1], 10);
+    if (num >= 20 && num <= 50) {
+      return euHalf[2] === "0" ? String(num) : `${num},5`;
+    }
+  }
+  const euInt = s.match(/^(\d{2})$/);
+  if (euInt) {
+    const num = Number.parseInt(euInt[1], 10);
+    if (num >= 20 && num <= 50) return String(num);
+  }
+  return "";
+}
+
+export function sortAvailableSizes(sizes) {
+  return [...sizes].sort((a, b) => {
+    const strA = String(a).trim();
+    const strB = String(b).trim();
+    const aIsNum = /^\d+(?:[.,]\d+)?$/.test(strA);
+    const bIsNum = /^\d+(?:[.,]\d+)?$/.test(strB);
+    if (aIsNum && bIsNum) {
+      return Number.parseFloat(strA.replace(",", ".")) - Number.parseFloat(strB.replace(",", "."));
+    }
+    if (aIsNum) return -1;
+    if (bIsNum) return 1;
+    const idxA = CLOTHING_SIZE_ORDER.indexOf(strA.toUpperCase());
+    const idxB = CLOTHING_SIZE_ORDER.indexOf(strB.toUpperCase());
+    if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+    if (idxA !== -1) return -1;
+    if (idxB !== -1) return 1;
+    return strA.localeCompare(strB, "tr");
+  });
+}
+
+/**
+ * Extracts real in-stock EU shoe numbers & clothing sizes from Akinon storefront JSON
+ * (SuperStep, FashFed, Intersport, Sportive, Sporjinal, Koton).
+ */
+export function extractAkinonAvailableSizes(p) {
+  const found = new Set();
+  const addRaw = (val) => {
+    const norm = normalizeAvailableSize(val);
+    if (norm) found.add(norm);
+  };
+
+  // 1. Walk extra_data.variants options (contains full in-stock size list per product!)
+  const variants = Array.isArray(p?.extra_data?.variants) ? p.extra_data.variants : [];
+  for (const v of variants) {
+    const opts = Array.isArray(v?.options) ? v.options : [];
+    for (const o of opts) {
+      const inStock =
+        o?.is_selectable !== false &&
+        o?.in_stock !== false &&
+        o?.product?.in_stock !== false;
+      if (!inStock) continue;
+      const attrs = o?.product?.attributes || {};
+      const preferred = attrs.filterable_size || attrs.filterable_beden || attrs.beden;
+      if (preferred) {
+        addRaw(preferred);
+      } else {
+        addRaw(attrs.integration_beden || o?.label);
+      }
+    }
+  }
+
+  // 2. Fallback / supplement from top-level product attributes when in stock
+  if (p?.in_stock !== false) {
+    const attrs = p?.attributes || {};
+    const preferred = attrs.filterable_size || attrs.filterable_beden || attrs.beden;
+    if (preferred) {
+      addRaw(preferred);
+    } else if (attrs.integration_beden) {
+      addRaw(attrs.integration_beden);
+    }
+  }
+
+  return sortAvailableSizes([...found]);
+}
+
 async function fetchAkinonStore(store, query) {
   const url = `${store.baseUrl}/list/?search_text=${encodeURIComponent(query)}&format=json`;
   const res = await fetch(url, {
@@ -2450,6 +2542,7 @@ async function fetchAkinonStore(store, query) {
       ? absPath
       : `${store.baseUrl}${absPath.startsWith("/") ? "" : "/"}${absPath}`;
     const image = String(p?.productimage_set?.[0]?.image || "").trim();
+    const availableSizes = extractAkinonAvailableSizes(p);
 
     out.push({
       id: `${store.name.toLowerCase().replace(/[^a-z0-9]/g, "")}-${p.pk || out.length}`,
@@ -2462,6 +2555,7 @@ async function fetchAkinonStore(store, query) {
       image,
       productUrl,
       inStock: p?.in_stock !== false,
+      availableSizes,
       freeShipThreshold: store.freeShipThreshold,
       deliveryLabel: "Hızlı Kargo (1-3 gün)",
       deliveryDays: 2,
@@ -2718,6 +2812,12 @@ export function mergeZeroKeyStoreItems(rawItems, query) {
     });
 
     const storeListText = storeItems.map((x) => x.storeName).join(", ");
+    const mergedSizesSet = new Set();
+    for (const x of storeItems) {
+      for (const sz of x.availableSizes || []) mergedSizesSet.add(sz);
+    }
+    const availableSizes = sortAvailableSizes([...mergedSizesSet]);
+
     saveVirtualDetail(vKey, {
       id: `trnet-${groupSeq}-${bestCode || best.id}`,
       title: best.title,
@@ -2745,9 +2845,11 @@ export function mergeZeroKeyStoreItems(rawItems, query) {
       fakeDiscount: histAnalysis.fakeDiscount,
       verdict: histAnalysis.verdict,
       variants: [],
+      availableSizes,
       specs: [
         ...(bestCode ? [{ name: "Ürün / Model Kodu", value: bestCode }] : []),
         ...(bestBrand ? [{ name: "Marka", value: bestBrand }] : []),
+        ...(availableSizes.length ? [{ name: "Stoktaki Beden / Numaralar", value: availableSizes.join(", ") }] : []),
         ...(refListPrice && refListPrice > minPrice
           ? [{ name: "İndirimsiz Liste Fiyatı", value: `${refListPrice.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL` }]
           : []),
@@ -2764,6 +2866,7 @@ export function mergeZeroKeyStoreItems(rawItems, query) {
       lowestPrice: minPrice,
       priceSource: "live_verified",
       priceVerified: true,
+      availableSizes,
       offerCount: offers.length,
       badge: offers.length > 1 ? `${offers.length} Mağazada Kıyasla` : best.storeName,
       source: offers.length > 1 ? storeListText : best.storeName,

@@ -31,6 +31,7 @@ import {
 } from "./db.js";
 import { resolveBarcode, searchSecondHandTurkey, testSerperKey } from "./providers.js";
 import { optimizeCart } from "./optimizer.js";
+import { annotateSearchPricePositions } from "./analyzer.js";
 import {
   analyzeOfferAuthenticity,
   extractVariantAttributes,
@@ -270,10 +271,12 @@ app.get("/api/search", async (req, res) => {
       };
     });
 
+    const annotatedProducts = annotateSearchPricePositions(enrichedProducts);
+
     res.json({
       ...result,
-      filteredCount: enrichedProducts.length,
-      products: enrichedProducts,
+      filteredCount: annotatedProducts.length,
+      products: annotatedProducts,
     });
   } catch (err) {
     res.status(502).json({
