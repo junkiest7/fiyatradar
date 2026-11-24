@@ -208,12 +208,12 @@ function isNonShoppingUrl(urlStr) {
 }
 
 const LISTING_PATH_RE =
-  /(?:^|\/)(sr|ara|arama|search|kategori|category|marka|markalar|brand|butik|magaza|koleksiyon|koleksiyonlar|kampanya|kampanyalar|tum-urunler|indirimler)(?:\/|$)/i;
+  /(?:^|\/)(sr|ara|arama|search|list|browse|kategori|category|marka|markalar|brand|butik|magaza|koleksiyon|koleksiyonlar|kampanya|kampanyalar|tum-urunler|indirimler|urunler|erkek-ayakkabi|kadin-ayakkabi|cocuk-ayakkabi|spor-ayakkabi|erkek-spor-ayakkabi|kadin-spor-ayakkabi)(?:\/|$)/i;
 
 const LISTING_TITLE_RE =
-  /\b(modelleri\s*(?:ve|,|&)\s*fiyatlari|fiyatlari\s*(?:ve|,|&)\s*modelleri|cesitleri\s*(?:ve|,|&)\s*fiyatlari|markalari\s*(?:ve|,|&)\s*fiyatlari|urunleri\s*(?:ve|,|&)\s*fiyatlari|en\s+ucuz\s+.+\s+fiyatlari|parfumeri|parfumleri|gomlekleri|ayakkabilari|tisortleri|elbiseleri|pantolonlari|ceketleri|cantalari|gozlukleri|saatleri|telefonlari|bilgisayarlari)\b/i;
+  /\b(modelleri|cesitleri|fiyatlari|markalari\s*(?:ve|,|&)\s*fiyatlari|urunleri\s*(?:ve|,|&)\s*fiyatlari|en\s+ucuz\s+.+\s+fiyatlari|parfumeri|parfumleri|gomlekleri|ayakkabilari|tisortleri|elbiseleri|pantolonlari|ceketleri|cantalari|gozlukleri|saatleri|telefonlari|bilgisayarlari)\b/i;
 
-const SEARCH_QUERY_PARAMS = ["q", "query", "search", "arama", "keyword", "k", "s", "ft"];
+const SEARCH_QUERY_PARAMS = ["q", "query", "search", "search_text", "arama", "keyword", "k", "s", "ft"];
 
 function normalizeUrlForMatch(urlStr) {
   try {
@@ -389,6 +389,63 @@ export function classifyStoreUrl(urlStr, title = "") {
     return { isProductPage: false, isListingPage: true, productId: null, slug };
   }
 
+  // 10c. Major shoe / sportswear / fashion / tech TR stores with distinct product vs category URLs
+  if (host === "adidas.com.tr" || host.endsWith(".adidas.com.tr")) {
+    const m = pathname.match(/\/([A-Z0-9]{5,8})\.html$/i);
+    if (m) return { isProductPage: true, isListingPage: false, productId: `adidas:${m[1].toLowerCase()}`, slug };
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+  if (host === "nike.com" || host.endsWith(".nike.com")) {
+    const m = pathname.match(/\/t\/[^/]+\/([A-Z0-9-]{6,})(?:\/|$)/i);
+    if (m || /\/t\//i.test(pathname)) {
+      return { isProductPage: true, isListingPage: false, productId: m ? `nike:${m[1].toLowerCase()}` : null, slug };
+    }
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+  if (host === "puma.com" || host.endsWith(".puma.com")) {
+    const m = pathname.match(/\/pd\/[^/]+\/(\d{6,})/i) || pathname.match(/-(\d{6,})(?:\/|$)/);
+    if (m || /\/pd\//i.test(pathname)) {
+      return { isProductPage: true, isListingPage: false, productId: m ? `puma:${m[1]}` : null, slug };
+    }
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+  if (host === "flo.com.tr" || host.endsWith(".flo.com.tr")) {
+    const m = pathname.match(/\/urun\/[^/]+-(\d{6,})(?:\/|$)/i) || pathname.match(/-(\d{7,})(?:\/|$)/);
+    if (m || /\/urun\//i.test(pathname)) {
+      return { isProductPage: true, isListingPage: false, productId: m ? `flo:${m[1]}` : null, slug };
+    }
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+  if (
+    /(?:^|\.)(superstep\.com\.tr|fashfed\.com|intersport\.com\.tr|barcin\.com|sportive\.com\.tr|sporjinal\.com|sneaksup\.com|korayspor\.com|koton\.com|tefal\.com\.tr|lacoste\.com\.tr|converse\.com\.tr)$/.test(
+      host
+    )
+  ) {
+    if (LISTING_PATH_RE.test(pathname)) {
+      return { isProductPage: false, isListingPage: true, productId: null, slug };
+    }
+    const mSku = pathname.match(/\/urun\/.+?\/([a-z0-9-]{4,})\/?$/i) || pathname.match(/-([a-z]{1,4}\d{3,}[a-z0-9-]*|\d{5,})\/?$/i);
+    if (/\/urun\//i.test(pathname) || mSku) {
+      return { isProductPage: true, isListingPage: false, productId: mSku ? `${host.split(".")[0]}:${mSku[1].toLowerCase()}` : null, slug };
+    }
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+  if (host === "decathlon.com.tr" || host.endsWith(".decathlon.com.tr")) {
+    if (/\/p\//i.test(pathname)) return { isProductPage: true, isListingPage: false, productId: null, slug };
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+  if (host === "dr.com.tr" || host.endsWith(".dr.com.tr")) {
+    const m = pathname.match(/urunno=(\d+)/i);
+    if (m) return { isProductPage: true, isListingPage: false, productId: `dr:${m[1]}`, slug };
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+  if (host === "vatanbilgisayar.com" || host.endsWith(".vatanbilgisayar.com")) {
+    if (/\.html$/i.test(pathname) && !LISTING_PATH_RE.test(pathname)) {
+      return { isProductPage: true, isListingPage: false, productId: null, slug };
+    }
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+
   // 11. Universal fallback checks for other stores
   const hasSearchQueryParam = SEARCH_QUERY_PARAMS.some((k) => u.searchParams.has(k));
   if (hasSearchQueryParam || LISTING_PATH_RE.test(pathname)) {
@@ -411,7 +468,20 @@ export function classifyStoreUrl(urlStr, title = "") {
   }
 
   // Root / homepage URLs are never single products
-  if (pathname === "/" || pathname.split("/").filter(Boolean).length === 0) {
+  const segments = pathname.split("/").filter(Boolean);
+  if (pathname === "/" || segments.length === 0) {
+    return { isProductPage: false, isListingPage: true, productId: null, slug };
+  }
+
+  // Unknown store URLs without an explicit product path or product ID/SKU in the final segment
+  // (e.g. /adidas-erkek-ayakkabi or /erkek/spor-ayakkabi) are category/listing pages, not direct products!
+  const lastSeg = segments[segments.length - 1] || "";
+  const hasExplicitProductSignal =
+    /\.html$/i.test(lastSeg) ||
+    /(?:^|[-_])([a-z]{1,4}\d{3,}|\d{5,})(?:$|[-_])/i.test(lastSeg) ||
+    u.searchParams.has("productId") ||
+    u.searchParams.has("urunId");
+  if (!hasExplicitProductSignal) {
     return { isProductPage: false, isListingPage: true, productId: null, slug };
   }
 
@@ -1337,16 +1407,19 @@ export function buildTurkeySearchResponse(query, rawOrganic, imagePoolInput, pro
     catalogLinks.find((c) => c.image)?.image ||
     defaultProductImage;
 
-  const extraStoreVariants = catalogLinks.slice(0, 10).map((c) => ({
-    name: `${c.store} — ${c.title.slice(0, 56)}`,
-    price: null,
-    seller: c.isListingPage ? `${c.store} (Kategori Sayfası)` : c.store,
-    url: c.url,
-    image: c.image || "",
-    isAkakceUrl: false,
-    isInternalVirtual: false,
-    isListingPage: c.isListingPage,
-  }));
+  const extraStoreVariants = catalogLinks
+    .filter((c) => !c.isListingPage)
+    .slice(0, 10)
+    .map((c) => ({
+      name: `${c.store} — ${c.title.slice(0, 56)}`,
+      price: null,
+      seller: c.store,
+      url: c.url,
+      image: c.image || "",
+      isAkakceUrl: false,
+      isInternalVirtual: false,
+      isListingPage: false,
+    }));
 
   const aggregateDetail = {
     id: `${prefix}-${encodeURIComponent(query.toLocaleLowerCase("tr-TR")).slice(0, 32)}`,
@@ -2190,11 +2263,10 @@ async function fetchAkinonStore(store, query) {
 
     const retailPrice = typeof p?.retail_price === "number" ? p.retail_price : parseTrPrice(p?.retail_price);
     const absPath = String(p?.absolute_url || "").trim();
+    if (!absPath || /\/list\//i.test(absPath)) continue;
     const productUrl = absPath.startsWith("http")
       ? absPath
-      : absPath
-        ? `${store.baseUrl}${absPath.startsWith("/") ? "" : "/"}${absPath}`
-        : `${store.baseUrl}/list/?search_text=${encodeURIComponent(query)}`;
+      : `${store.baseUrl}${absPath.startsWith("/") ? "" : "/"}${absPath}`;
     const image = String(p?.productimage_set?.[0]?.image || "").trim();
 
     out.push({
@@ -2255,12 +2327,11 @@ async function fetchBeymen(query) {
     const rel = matchesZeroKeyQuery(title, brand, "", query);
     if (!rel.ok) return;
 
-    const href = $el.find("a").first().attr("href") || "";
+    const href = ($el.find("a").first().attr("href") || "").trim();
+    if (!href || !/\/p_/i.test(href)) return;
     const productUrl = href.startsWith("http")
       ? href
-      : href
-        ? `https://www.beymen.com${href.startsWith("/") ? "" : "/"}${href}`
-        : url;
+      : `https://www.beymen.com${href.startsWith("/") ? "" : "/"}${href}`;
     if (seen.has(productUrl)) return;
     seen.add(productUrl);
 
@@ -2330,12 +2401,11 @@ async function fetchDrStore(query) {
     const rel = matchesZeroKeyQuery(title, brand, gtm?.item_id || "", query);
     if (!rel.ok) return;
 
-    const href = $el.find("a").first().attr("href") || "";
+    const href = ($el.find("a").first().attr("href") || "").trim();
+    if (!href || !/urunno=/i.test(href)) return;
     const productUrl = href.startsWith("http")
       ? href
-      : href
-        ? `https://www.dr.com.tr${href.startsWith("/") ? "" : "/"}${href}`
-        : url;
+      : `https://www.dr.com.tr${href.startsWith("/") ? "" : "/"}${href}`;
     if (seen.has(productUrl)) return;
     seen.add(productUrl);
 

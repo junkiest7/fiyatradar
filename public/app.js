@@ -120,9 +120,6 @@ const els = {
   resultsSubmeta: $("resultsSubmeta"),
   resultsGrid: $("resultsGrid"),
   searchSortSelect: $("searchSortSelect"),
-  filterMinPrice: $("filterMinPrice"),
-  filterMaxPrice: $("filterMaxPrice"),
-  applyPriceFilterBtn: $("applyPriceFilterBtn"),
   detailContainer: $("detailContainer"),
   detailCartToggleBtn: $("detailCartToggleBtn"),
   detailShareCardBtn: $("detailShareCardBtn"),
@@ -725,12 +722,8 @@ async function performSearch(query, opts = {}) {
   els.clearSearchBtn.hidden = false;
 
   const sort = opts.sort || els.searchSortSelect.value || "relevance";
-  const minPrice = els.filterMinPrice.value.trim();
-  const maxPrice = els.filterMaxPrice.value.trim();
 
   const params = new URLSearchParams({ q, sort });
-  if (minPrice) params.set("minPrice", minPrice);
-  if (maxPrice) params.set("maxPrice", maxPrice);
   if (opts.refresh) params.set("refresh", "1");
 
   const isUrl = /^https?:\/\//i.test(q);
@@ -757,19 +750,19 @@ async function performSearch(query, opts = {}) {
     state.secondHandData = null;
     state.secondHandLoading = false;
     state.secondHandError = "";
-    // Reset per-search quick filters cleanly; auto-hide accessories and category/listing pages when direct priced products exist
+    // Reset per-search quick filters cleanly; auto-hide accessories and category/listing pages whenever direct products exist
     const allProds = data.products || [];
     const hasRetail = allProds.some((p) => !p.isSecondHand);
     const retailProds = hasRetail ? allProds.filter((p) => !p.isSecondHand) : allProds;
     const hasAccessories = retailProds.some((p) => p.isAccessory);
     const hasPrimary = retailProds.some((p) => !p.isAccessory);
     const hasListings = retailProds.some((p) => p.isListingPage);
-    const directPricedCount = retailProds.filter(
-      (p) => !p.isListingPage && p.badge !== "Tüm Mağazalar" && typeof p.lowestPrice === "number" && p.lowestPrice > 0
+    const directProductCount = retailProds.filter(
+      (p) => !p.isListingPage && p.badge !== "Tüm Mağazalar"
     ).length;
     state.searchFilters = {
       hideAccessories: hasAccessories && hasPrimary,
-      hideListings: hasListings && directPricedCount >= 2,
+      hideListings: hasListings && directProductCount >= 1,
       pricedOnly: false,
       officialOnly: false,
       freeShippingOnly: false,
@@ -3361,12 +3354,8 @@ function bindEvents() {
     if (chip) performSearch(chip.dataset.query);
   });
 
-  // Search sort & price filter
+  // Search sort
   els.searchSortSelect.addEventListener("change", () => {
-    if (state.lastQuery) performSearch(state.lastQuery);
-  });
-
-  els.applyPriceFilterBtn.addEventListener("click", () => {
     if (state.lastQuery) performSearch(state.lastQuery);
   });
 

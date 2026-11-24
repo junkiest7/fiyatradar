@@ -1085,5 +1085,23 @@ test("v11 Zero-Key Turkey Retail Network: strict relevance guard, cross-store SK
   assert.ok(liveDetail.trustSummary);
 });
 
+test("v12 Direct Product Link Enforcement: rejects Adidas/Nike/FLO/SuperStep/generic category pages as listing pages", () => {
+  // Category / Modelleri pages MUST be classified as isListingPage: true
+  assert.equal(classifyStoreUrl("https://www.adidas.com.tr/tr/erkek-ayakkabi", "Adidas Erkek Ayakkabı Modelleri").isListingPage, true);
+  assert.equal(classifyStoreUrl("https://www.nike.com/tr/w/erkek-ayakkabi", "Nike Erkek Ayakkabı").isListingPage, true);
+  assert.equal(classifyStoreUrl("https://www.flo.com.tr/marka/adidas/erkek-ayakkabi", "Adidas Erkek Ayakkabı").isListingPage, true);
+  assert.equal(classifyStoreUrl("https://www.superstep.com.tr/adidas-erkek-ayakkabi/", "Adidas Erkek Ayakkabı").isListingPage, true);
+  assert.equal(classifyStoreUrl("https://www.fashfed.com/list/?search_text=adidas", "Adidas Modelleri").isListingPage, true);
+  assert.equal(classifyStoreUrl("https://www.some-tr-shop.com.tr/erkek/adidas-ayakkabi", "Adidas Erkek Ayakkabı Modelleri").isListingPage, true);
+
+  // Direct single-product pages MUST be classified as isProductPage: true, isListingPage: false
+  assert.equal(classifyStoreUrl("https://www.adidas.com.tr/tr/runfalcon-5-running-shoes/IE8808.html", "Adidas Runfalcon 5").isProductPage, true);
+  assert.equal(classifyStoreUrl("https://www.nike.com/tr/t/air-force-1-07-ayakkabisi-GjGXSP/CW2288-111", "Nike Air Force 1").isProductPage, true);
+  assert.equal(classifyStoreUrl("https://www.superstep.com.tr/urun/adidas-superstar-ii/ki5010/", "adidas Superstar II").isProductPage, true);
+  assert.equal(classifyStoreUrl("https://www.sporjinal.com/adidas-vl-court-base-erkek-beyaz-spor-ayakkabi-id3711/", "adidas VL Court").isProductPage, true);
+  assert.equal(classifyStoreUrl("https://www.dr.com.tr/elektronik/apple-airpods-4/urunno=0002136379001", "Apple AirPods 4").isProductPage, true);
+});
+
+
 
 
