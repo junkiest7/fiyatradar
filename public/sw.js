@@ -1,10 +1,10 @@
 /**
- * FiyatRadar Service Worker (v9)
+ * FiyatRadar Service Worker (v10)
  * Network-first for app shell so iPhone PWA always gets instant updates,
  * with cache fallback when offline, plus native iOS 16.4+ Web Push notifications.
  */
 
-const CACHE_NAME = "fiyatradar-v9";
+const CACHE_NAME = "fiyatradar-v10";
 const SHELL_ASSETS = [
   "/",
   "/index.html",
@@ -15,11 +15,11 @@ const SHELL_ASSETS = [
   "/mediaSearch.js",
   "/shareCard.js",
   "/pushClient.js",
-  "/manifest.webmanifest",
-  "/icons/apple-touch-icon.png",
-  "/icons/icon-192.png",
-  "/icons/icon-512.png",
-  "/icons/favicon-32.png",
+  "/manifest.webmanifest?v=10",
+  "/icons/apple-touch-icon.png?v=10",
+  "/icons/icon-192.png?v=10",
+  "/icons/icon-512.png?v=10",
+  "/icons/favicon-32.png?v=10",
 ];
 
 self.addEventListener("install", (event) => {
@@ -109,8 +109,8 @@ self.addEventListener("push", (event) => {
 
   const options = {
     body: data.body,
-    icon: "/icons/icon-192.png",
-    badge: "/icons/favicon-32.png",
+    icon: "/icons/icon-192.png?v=10",
+    badge: "/icons/favicon-32.png?v=10",
     tag: data.tag || "fiyatradar-alert",
     renotify: true,
     data: { url: data.url || "/?view=watchlist" },

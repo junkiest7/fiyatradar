@@ -7,18 +7,18 @@
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait-primary",
-  "background_color": "#182033",
+  "background_color": "#061022",
   "theme_color": "#f7f6f2",
   "categories": ["shopping", "finance", "utilities"],
   "icons": [
     {
-      "src": "/icons/icon-192.png",
+      "src": "/icons/icon-192.png?v=10",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/icons/icon-512.png",
+      "src": "/icons/icon-512.png?v=10",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"
@@ -30,28 +30,28 @@
       "short_name": "Barkod",
       "description": "Mağazada barkod okutup internetle kıyasla",
       "url": "/?action=scan",
-      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+      "icons": [{ "src": "/icons/icon-192.png?v=10", "sizes": "192x192", "type": "image/png" }]
     },
     {
       "name": "Sesli Ara",
       "short_name": "Sesli Ara",
       "description": "Ürün adını söyleyerek anında ara",
       "url": "/?action=voice",
-      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+      "icons": [{ "src": "/icons/icon-192.png?v=10", "sizes": "192x192", "type": "image/png" }]
     },
     {
       "name": "Sepet Optimizatörü",
       "short_name": "Sepet",
       "description": "Tek mağaza vs karışık sepet kargo hesabı",
       "url": "/?view=cart",
-      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+      "icons": [{ "src": "/icons/icon-192.png?v=10", "sizes": "192x192", "type": "image/png" }]
     },
     {
       "name": "Takip Listem",
       "short_name": "Takip",
       "description": "Hedef fiyat alarmları ve bütçe klasörleri",
       "url": "/?view=watchlist",
-      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+      "icons": [{ "src": "/icons/icon-192.png?v=10", "sizes": "192x192", "type": "image/png" }]
     }
   ],
   "share_target": {

@@ -90,14 +90,6 @@ const state = {
 const $ = (id) => document.getElementById(id);
 
 const els = {
-  openShortcutsBtn: $("openShortcutsBtn"),
-  shortcutsModal: $("shortcutsModal"),
-  closeShortcutsBtn: $("closeShortcutsBtn"),
-  shortcutShareBaseUrl: $("shortcutShareBaseUrl"),
-  copyShortcutShareUrlBtn: $("copyShortcutShareUrlBtn"),
-  shortcutApiBaseUrl: $("shortcutApiBaseUrl"),
-  copyShortcutApiUrlBtn: $("copyShortcutApiUrlBtn"),
-  shortcutQuickGrid: $("shortcutQuickGrid"),
   themeToggleBtn: $("themeToggleBtn"),
   themeIconMoon: $("themeIconMoon"),
   themeIconSun: $("themeIconSun"),
@@ -3923,33 +3915,6 @@ function bindEvents() {
     }
   });
 
-  // Apple Shortcuts & Haptic Touch Modal handlers
-  els.openShortcutsBtn?.addEventListener("click", openShortcutsModal);
-  els.closeShortcutsBtn?.addEventListener("click", closeShortcutsModal);
-  els.shortcutsModal?.addEventListener("click", (e) => {
-    if (e.target === els.shortcutsModal) closeShortcutsModal();
-  });
-  els.copyShortcutShareUrlBtn?.addEventListener("click", () => {
-    const val = els.shortcutShareBaseUrl?.textContent || "";
-    copyTextWithFeedback(val, "Paylaşım kestirme adresi kopyalandı!");
-  });
-  els.copyShortcutApiUrlBtn?.addEventListener("click", () => {
-    const val = els.shortcutApiBaseUrl?.textContent || "";
-    copyTextWithFeedback(val, "Hızlı API adresi kopyalandı!");
-  });
-  els.shortcutQuickGrid?.addEventListener("click", (e) => {
-    const copyBtn = e.target.closest("[data-copy-shortcut]");
-    if (copyBtn) {
-      copyTextWithFeedback(copyBtn.dataset.copyShortcut, "Kestirme bağlantısı kopyalandı!");
-      return;
-    }
-    const runBtn = e.target.closest("[data-run-shortcut]");
-    if (runBtn) {
-      closeShortcutsModal();
-      handleLaunchUrl(runBtn.dataset.runShortcut);
-    }
-  });
-
   // Settings Modal handlers
   els.openSettingsBtn?.addEventListener("click", openSettingsModal);
   els.closeSettingsBtn?.addEventListener("click", closeSettingsModal);
@@ -3963,7 +3928,6 @@ function bindEvents() {
       if (els.scannerModal && !els.scannerModal.hidden) closeScannerModal();
       if (els.photoSearchModal && !els.photoSearchModal.hidden) closePhotoModal();
       if (els.shareCardModal && !els.shareCardModal.hidden) closeShareCardModal();
-      if (els.shortcutsModal && !els.shortcutsModal.hidden) closeShortcutsModal();
       if (els.settingsModal && !els.settingsModal.hidden) closeSettingsModal();
     }
   });
@@ -4230,70 +4194,6 @@ function downloadCurrentShareCard() {
 
 function closeShareCardModal() {
   if (els.shareCardModal) els.shareCardModal.hidden = true;
-}
-
-async function copyTextWithFeedback(text, successMsg) {
-  if (!text) return;
-  try {
-    await navigator.clipboard.writeText(text);
-    showToast(successMsg || "Panoya kopyalandı.");
-  } catch {
-    showToast("Kopyalama desteklenmiyor; adresi manuel seçebilirsiniz.");
-  }
-}
-
-function openShortcutsModal() {
-  if (!els.shortcutsModal) return;
-  const origin = window.location.origin;
-  if (els.shortcutShareBaseUrl) {
-    els.shortcutShareBaseUrl.textContent = `${origin}/share?text=`;
-  }
-  if (els.shortcutApiBaseUrl) {
-    els.shortcutApiBaseUrl.textContent = `${origin}/api/shortcut-search?text=`;
-  }
-  if (els.shortcutQuickGrid) {
-    const actions = [
-      {
-        title: "📷 Barkod Tara",
-        desc: "Mağazada barkod okutup anında kıyasla",
-        path: "/?action=scan",
-      },
-      {
-        title: "🎙️ Sesli Ara",
-        desc: "Türkçe sesle doğrudan ürün arat",
-        path: "/?action=voice",
-      },
-      {
-        title: "🛒 Sepet Optimizatörü",
-        desc: "Tek mağaza vs karışık sepet kargo hesabı",
-        path: "/?view=cart",
-      },
-      {
-        title: "🔔 Takip Listem",
-        desc: "Klasörler, bütçe ve hedef fiyat alarmları",
-        path: "/?view=watchlist",
-      },
-    ];
-    els.shortcutQuickGrid.innerHTML = actions
-      .map((a) => {
-        const full = `${origin}${a.path}`;
-        return `
-        <div class="shortcut-action-card">
-          <strong>${esc(a.title)}</strong>
-          <span>${esc(a.desc)}</span>
-          <div class="shortcut-action-btns">
-            <button type="button" class="btn btn-secondary btn-sm" data-copy-shortcut="${esc(full)}">Kopyala</button>
-            <button type="button" class="btn btn-ghost btn-sm" data-run-shortcut="${esc(full)}">Şimdi Dene</button>
-          </div>
-        </div>`;
-      })
-      .join("");
-  }
-  els.shortcutsModal.hidden = false;
-}
-
-function closeShortcutsModal() {
-  if (els.shortcutsModal) els.shortcutsModal.hidden = true;
 }
 
 function extractUrlFromSharedText(str) {

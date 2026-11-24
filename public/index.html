@@ -23,9 +23,9 @@
       } catch (e) {}
     })();
   </script>
-  <link rel="manifest" href="/manifest.webmanifest" />
-  <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png" />
-  <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" />
+  <link rel="manifest" href="/manifest.webmanifest?v=10" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png?v=10" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png?v=10" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
@@ -36,12 +36,7 @@
     <div class="container topbar-inner">
       <a href="#home" id="brandLogo" class="brand" aria-label="FiyatRadar Ana Sayfa">
         <span class="brand-mark" aria-hidden="true">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="11" cy="11" r="7"></circle>
-            <path d="M21 21l-4.35-4.35"></path>
-            <path d="M8 11h6"></path>
-            <path d="M11 8v6"></path>
-          </svg>
+          <img src="/icons/icon-192.png?v=10" alt="" class="brand-mark-img" />
         </span>
         <span class="brand-name">FiyatRadar</span>
         <span class="brand-tag">TR Piyasa Analizi</span>
@@ -62,12 +57,6 @@
       </nav>
 
       <div class="topbar-actions">
-        <button type="button" id="openShortcutsBtn" class="settings-icon-btn" aria-label="iPhone Kestirmeler ve Hızlı Erişim" title="iPhone Kestirmeler & Hızlı Erişim">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
-          </svg>
-        </button>
-
         <button type="button" id="themeToggleBtn" class="settings-icon-btn" aria-label="Karanlık / Aydınlık Tema" title="Karanlık / Aydınlık Tema">
           <svg id="themeIconMoon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
@@ -306,7 +295,7 @@
   <!-- iOS Safari Install Guide Banner (shown only on iPhone/iPad Safari outside standalone mode) -->
   <div id="iosInstallBanner" class="ios-install-banner" hidden>
     <div class="ios-install-inner">
-      <img src="/icons/apple-touch-icon.png" alt="FiyatRadar" class="ios-install-icon" />
+      <img src="/icons/apple-touch-icon.png?v=10" alt="FiyatRadar" class="ios-install-icon" />
       <div class="ios-install-copy">
         <strong>iPhone Uygulaması Olarak Yükle</strong>
         <span>Safari alt menüsünden <strong>Paylaş (↑)</strong> → <strong>Ana Ekrana Ekle</strong> dokunun.</span>
@@ -474,52 +463,6 @@
       <div class="modal-actions" style="margin-top:14px;">
         <button type="button" id="downloadShareCardBtn" class="btn btn-secondary btn-sm">PNG İndir</button>
         <button type="button" id="nativeShareCardBtn" class="btn btn-primary btn-sm">WhatsApp / Paylaş ↗</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- iPhone Apple Shortcuts & Home-Screen Quick Actions Guide Modal -->
-  <div id="shortcutsModal" class="modal-backdrop" hidden>
-    <div class="modal-sheet shortcuts-sheet" role="dialog" aria-modal="true" aria-labelledby="shortcutsModalTitle">
-      <div class="modal-header">
-        <h3 id="shortcutsModalTitle">⚡ iPhone Kestirmeler & Hızlı Erişim</h3>
-        <button type="button" id="closeShortcutsBtn" class="clear-btn" style="position:static;" aria-label="Kapat">&times;</button>
-      </div>
-
-      <div class="shortcut-section">
-        <h4>1. Trendyol / Hepsiburada / Safari'den "Paylaş → FiyatRadar'da Ara"</h4>
-        <p class="muted-text" style="margin:0;font-size:0.81rem;">
-          Herhangi bir mağaza uygulamasında ürüne bakarken link kopyalamadan tek dokunuşla tüm Türkiye fiyatlarını görün:
-        </p>
-        <ol class="shortcut-steps">
-          <li>iPhone'da <strong>Kestirmeler (Shortcuts)</strong> uygulamasını açıp sağ üstten <strong>+</strong> dokunun.</li>
-          <li>Alt/üstteki <strong>"i" (Bilgi)</strong> simgesinden <strong>"Paylaşım Sayfasında Göster"</strong> seçeneğini açın (Girişler: <em>URL'ler ve Metin</em>).</li>
-          <li><strong>"URL'yi Aç"</strong> (Open URLs) işlemini ekleyin; adres alanına aşağıdaki linki yapıştırıp sonuna <strong>Kestirme Girişi (Shortcut Input)</strong> değişkenini ekleyin.</li>
-          <li>Kestirmeye <strong>"FiyatRadar'da Ara"</strong> adını verip kaydedin!</li>
-        </ol>
-        <div class="shortcut-copy-row">
-          <code id="shortcutShareBaseUrl" class="shortcut-copy-code">https://fiyatradar-0c0y.onrender.com/share?text=</code>
-          <button type="button" id="copyShortcutShareUrlBtn" class="btn btn-primary btn-sm">Kopyala</button>
-        </div>
-      </div>
-
-      <div class="shortcut-section">
-        <h4>2. İkona Uzun Basma (Haptic Touch) & Action Button Kestirmeleri</h4>
-        <p class="muted-text" style="margin:0;font-size:0.81rem;">
-          Ana ekran ikonuna uzun basarak veya aşağıdaki bağlantıları iPhone <strong>Eylem Düğmesi / Kilit Ekranı Widget'ına</strong> atayarak tek dokunuşla açabilirsiniz:
-        </p>
-        <div class="shortcut-actions-grid" id="shortcutQuickGrid"></div>
-      </div>
-
-      <div class="shortcut-section" style="margin-bottom:0;">
-        <h4>3. Kestirmeler İçin Hızlı Fiyat API'si (İleri Düzey)</h4>
-        <p class="muted-text" style="margin:0 0 8px;font-size:0.8rem;">
-          Uygulamayı bile açmadan iPhone bildirim bandında en ucuz fiyatı görmek isterseniz Kestirmeler'de <em>"URL İçeriğini Al"</em> ile kullanabilirsiniz:
-        </p>
-        <div class="shortcut-copy-row">
-          <code id="shortcutApiBaseUrl" class="shortcut-copy-code">https://fiyatradar-0c0y.onrender.com/api/shortcut-search?text=</code>
-          <button type="button" id="copyShortcutApiUrlBtn" class="btn btn-secondary btn-sm">Kopyala</button>
-        </div>
       </div>
     </div>
   </div>
