@@ -21,13 +21,14 @@ import {
   classifyCardPricePosition,
   detectFakeDiscount,
 } from "../src/analyzer.js";
-import { getProductDetail, searchProducts } from "../src/scraper.js";
+import { getProductDetail, getSuggestions, searchProducts } from "../src/scraper.js";
 import {
   buildSecondHandQuickLinks,
   buildTurkeySearchResponse,
   classifyStoreUrl,
   detectSecondHandCondition,
   extractAkinonAvailableSizes,
+  extractAkinonBasketOffer,
   extractOrganicPriceInfo,
   fetchLiveProductPrice,
   getVirtualDetail,
@@ -41,11 +42,14 @@ import {
   resolveStoreFromUrl,
   searchOfficialFallback,
   searchSecondHandTurkey,
+  selectZeroKeyStoresForQuery,
   sortAvailableSizes,
 } from "../src/providers.js";
 import {
+  getPriceSnapshots,
   getPushSubscriptions,
   getWatchlist,
+  recordSnapshot,
   removePushSubscription,
   removeWatchlistItem,
   savePushSubscription,
@@ -1292,6 +1296,73 @@ test("v17 Feature #3: classifyCardPricePosition & annotateSearchPricePositions c
   assert.equal(byId.get("acc").pricePosition, undefined);
   assert.equal(byId.get("sh").pricePosition, undefined);
 });
+
+test("v18 Bugfixes & Security: official live stores pass Trust Shield with high trustScore, and snapshot throttle avoids duplicate bloat", () => {
+  for (const storeName of ["SuperStep", "Intersport", "FashFed", "Barçın", "Gratis", "Gaming.Gen.TR", "Koton", "Tefal Türkiye"]) {
+    const store = parseStoreInfo(storeName, "");
+    assert.equal(store.isOfficialSeller, true, `Expected ${storeName} to be official seller`);
+    assert.ok(store.trustScore >= 0.91, `Expected ${storeName} trustScore >= 0.91, got ${store.trustScore}`);
+    const shield = analyzeOfferAuthenticity(
+      { offerTitle: "Adidas Samba OG Erkek Spor Ayakkabı", store, url: "https://example.com/p" },
+      "Adidas Samba OG"
+    );
+    assert.equal(shield.isAuthorized, true, `Expected ${storeName} to be authorized in Trust Shield`);
+  }
+
+  // Snapshot 6-hour same-price throttle prevents duplicate bloat while recording real price changes
+  const snapId = `__test_v18_snap_${Date.now()}`;
+  recordSnapshot(snapId, 1999, "SuperStep", 2);
+  recordSnapshot(snapId, 1999, "SuperStep", 2); // throttled duplicate
+  recordSnapshot(snapId, 1799, "Intersport", 2); // price changed -> recorded
+  const snaps = getPriceSnapshots(snapId, 10);
+  assert.equal(snaps.length, 2);
+  assert.equal(snaps[0].net_price, 1999);
+  assert.equal(snaps[1].net_price, 1799);
+});
+
+test("v18 Hidden Gold & 23-Store Router: extractAkinonBasketOffer extracts cart price + coupon, selectZeroKeyStoresForQuery routes by vertical, and Google TR Suggest returns live suggestions", async () => {
+  // 1. Akinon basket_offers with pre-computed discounted_total_price & live coupon code
+  const basket = extractAkinonBasketOffer(
+    {
+      basket_offers: [
+        {
+          label: "KASIM30 KODU İLE SEPETTE EK %30 İNDİRİM",
+          listing_kwargs: { discounted_total_price: 2799.3 },
+        },
+      ],
+    },
+    3999
+  );
+  assert.equal(basket.basketPrice, 2799.3);
+  assert.equal(basket.couponCode, "KASIM30");
+  assert.ok(basket.basketOfferLabel.includes("KASIM30"));
+
+  // 2. Category-aware store router prevents blasting 17 Akinon stores for grocery/tech queries
+  const groceryRoute = selectZeroKeyStoresForQuery("lavazza kahve 1 kg");
+  assert.equal(groceryRoute.vertical, "grocery");
+  assert.equal(groceryRoute.akinonStores.length, 0);
+  assert.equal(groceryRoute.marketFiyati, true);
+  assert.equal(groceryRoute.migrosMarket, true);
+
+  const cosmeticsRoute = selectZeroKeyStoresForQuery("loreal maskara");
+  assert.equal(cosmeticsRoute.vertical, "cosmetics");
+  assert.equal(cosmeticsRoute.gratis, true);
+
+  const techRoute = selectZeroKeyStoresForQuery("rtx 4060 gaming laptop");
+  assert.equal(techRoute.vertical, "tech_gaming");
+  assert.equal(techRoute.gamingGen, true);
+  assert.equal(techRoute.dr, true);
+  assert.equal(techRoute.akinonStores.length, 0);
+
+  const fashionRoute = selectZeroKeyStoresForQuery("adidas samba erkek ayakkabı");
+  assert.equal(fashionRoute.vertical, "fashion_sports");
+  assert.ok(fashionRoute.akinonStores.length >= 15);
+
+  // 3. Google TR + Amazon TR blended autocomplete returns real Turkish suggestions
+  const suggestions = await getSuggestions("adidas samba");
+  assert.ok(Array.isArray(suggestions) && suggestions.length >= 3, `Expected >= 3 suggestions, got ${suggestions?.length}`);
+});
+
 
 
 

@@ -26,11 +26,38 @@ const TRUSTED_PLATFORMS = {
   "itopya": 0.91,
   "sinerji": 0.89,
   "incehesap": 0.89,
-  "gaming.gen.tr": 0.89,
+  "gaming.gen.tr": 0.91,
   "gürgençler": 0.95,
   "troy": 0.95,
   "pt": 0.94,
   "pozitif teknoloji": 0.94,
+  "superstep": 0.94,
+  "house of superstep": 0.94,
+  "fashfed": 0.93,
+  "intersport": 0.94,
+  "sportive": 0.92,
+  "sporjinal": 0.91,
+  "beymen": 0.96,
+  "koton": 0.92,
+  "tefal türkiye": 0.95,
+  "tefal": 0.95,
+  "barçın": 0.94,
+  "lacoste türkiye": 0.95,
+  "lacoste": 0.95,
+  "converse türkiye": 0.95,
+  "converse": 0.95,
+  "occasion": 0.93,
+  "under armour türkiye": 0.94,
+  "under armour": 0.94,
+  "marks & spencer türkiye": 0.94,
+  "marks & spencer": 0.94,
+  "gap türkiye": 0.93,
+  "gap": 0.93,
+  "gant türkiye": 0.94,
+  "gant": 0.94,
+  "nautica türkiye": 0.93,
+  "nautica": 0.93,
+  "gratis": 0.93,
 };
 
 const OFFICIAL_SELLER_KEYWORDS = [
@@ -187,6 +214,7 @@ export function parseStoreInfo(imgAlt, rawText) {
   if (!platform) platform = "Diğer Mağaza";
 
   const platLower = platform.toLocaleLowerCase("tr-TR");
+  const platAscii = transliterateTr(platform).toLowerCase();
   const sellerLower = seller.toLocaleLowerCase("tr-TR");
 
   // Clean duplicate seller like "Trendyol / Trendyol"
@@ -199,14 +227,45 @@ export function parseStoreInfo(imgAlt, rawText) {
   // Compute trust score (0.65 - 1.0)
   let trustScore = 0.72;
   for (const [key, score] of Object.entries(TRUSTED_PLATFORMS)) {
-    if (platLower.includes(key)) {
+    const keyAscii = transliterateTr(key).toLowerCase();
+    if (platLower.includes(key) || platAscii.includes(keyAscii)) {
       trustScore = Math.max(trustScore, score);
     }
   }
 
-  // Official / direct marketplace seller bonus
+  // Official / direct marketplace & single-brand/authorized retail seller bonus
   let isOfficialSeller = false;
-  if (!seller && (platLower.includes("amazon") || platLower.includes("hepsiburada") || platLower.includes("trendyol") || platLower.includes("mediamarkt") || platLower.includes("teknosa") || platLower.includes("vatan") || platLower.includes("migros"))) {
+  const DIRECT_OFFICIAL_PLATFORMS = [
+    "amazon",
+    "hepsiburada",
+    "trendyol",
+    "mediamarkt",
+    "teknosa",
+    "vatan",
+    "migros",
+    "d&r",
+    "superstep",
+    "house of superstep",
+    "fashfed",
+    "intersport",
+    "sportive",
+    "sporjinal",
+    "beymen",
+    "koton",
+    "tefal",
+    "barcin",
+    "lacoste",
+    "converse",
+    "occasion",
+    "under armour",
+    "marks & spencer",
+    "gap",
+    "gant",
+    "nautica",
+    "gratis",
+    "gaming.gen.tr",
+  ];
+  if (!seller && DIRECT_OFFICIAL_PLATFORMS.some((kw) => platAscii.includes(kw))) {
     isOfficialSeller = true;
     trustScore = Math.min(1.0, trustScore + 0.04);
   } else if (seller && OFFICIAL_SELLER_KEYWORDS.some((kw) => sellerLower.includes(kw))) {
@@ -725,8 +784,24 @@ const AUTHORIZED_RETAILER_KEYS = [
   "vakko",
   "brandroom",
   "superstep",
+  "house of superstep",
+  "fashfed",
+  "intersport",
+  "sportive",
+  "sporjinal",
+  "koton",
+  "tefal",
   "sneaks up",
   "barcin",
+  "lacoste",
+  "converse",
+  "occasion",
+  "under armour",
+  "marks & spencer",
+  "marksandspencer",
+  "gap",
+  "gant",
+  "nautica",
   "korayspor",
   "decathlon",
   "watsons",

@@ -28,6 +28,36 @@ import { analyzeOffers, analyzePriceHistory } from "./analyzer.js";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
+let sharedSerperRoundRobinIdx = 0;
+
+/**
+ * Returns a deduplicated, round-robin rotated pool of configured Serper API keys
+ * (client key -> SERPER_API_KEYS pool -> SERPER_API_KEY).
+ */
+export function getSerperKeyPool(clientKey = "") {
+  const keys = [];
+  const pushUnique = (raw) => {
+    const k = String(raw || "").trim();
+    if (k && !keys.includes(k)) keys.push(k);
+  };
+  pushUnique(clientKey);
+  const envList = [
+    ...String(process.env.SERPER_API_KEYS || "").split(/[\s,;]+/),
+    String(process.env.SERPER_API_KEY || ""),
+  ]
+    .map((k) => k.trim())
+    .filter(Boolean);
+  if (envList.length > 1) {
+    const start = sharedSerperRoundRobinIdx++ % envList.length;
+    for (let i = 0; i < envList.length; i++) {
+      pushUnique(envList[(start + i) % envList.length]);
+    }
+  } else {
+    envList.forEach(pushUnique);
+  }
+  return keys;
+}
+
 const MARKET_NAMES = {
   a101: "A101",
   bim: "BİM",
@@ -790,6 +820,7 @@ function setCachedImages(qKey, images) {
 // Stores whose product pages respond cleanly to fast lightweight og:image & live checkout price lookups
 const FAST_OG_HOSTS = [
   "superstep.com.tr",
+  "houseofsuperstep.com",
   "fashfed.com",
   "intersport.com.tr",
   "barcin.com",
@@ -799,6 +830,14 @@ const FAST_OG_HOSTS = [
   "tefal.com.tr",
   "lacoste.com.tr",
   "converse.com.tr",
+  "occasion.com.tr",
+  "underarmour.com.tr",
+  "marksandspencer.com.tr",
+  "gap.com.tr",
+  "gant.com.tr",
+  "nautica-tr.com",
+  "gratis.com",
+  "gaming.gen.tr",
   "beymen.com",
   "dr.com.tr",
   "migros.com.tr",
@@ -806,7 +845,7 @@ const FAST_OG_HOSTS = [
   "pazarama.com",
 ];
 
-function isFastOgHost(urlStr) {
+export function isFastOgHost(urlStr) {
   try {
     const host = new URL(urlStr).hostname.replace(/^www\.|^m\./i, "").toLowerCase();
     return FAST_OG_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
@@ -816,9 +855,9 @@ function isFastOgHost(urlStr) {
 }
 
 /**
- * Live-verifies the actual current checkout price & og:image directly from a Turkish store's
- * product page (JSON-LD Product/Offer.price + product:price:amount meta tags), eliminating
- * stale Google SERP snippet price mismatches.
+ * Live-verifies the actual current checkout price, rating, barcode/SKU & og:image directly
+ * from a Turkish store's product page (JSON-LD Product/Offer.price + product:price:amount meta tags),
+ * eliminating stale Google SERP snippet price mismatches.
  */
 export async function fetchLiveProductPrice(urlStr) {
   if (!urlStr || !isFastOgHost(urlStr)) return null;
@@ -838,6 +877,9 @@ export async function fetchLiveProductPrice(urlStr) {
     let livePrice = null;
     let inStock = true;
     let ogImg = "";
+    let rating = null;
+    let barcode = "";
+    let sku = "";
 
     // 1. JSON-LD Product / Offer schema (most accurate live checkout price across Turkish retailers)
     const ldMatches = [...html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
@@ -848,17 +890,35 @@ export async function fetchLiveProductPrice(urlStr) {
         for (const node of nodes) {
           if (!node || typeof node !== "object") continue;
           const offersRaw = node.offers;
-          if (!offersRaw) continue;
-          const offerList = Array.isArray(offersRaw) ? offersRaw : [offersRaw];
-          for (const off of offerList) {
-            const rawP = off?.price ?? off?.lowPrice;
-            const parsedP = typeof rawP === "number" ? rawP : parseTrPrice(String(rawP || ""));
-            if (parsedP && parsedP >= 10 && (livePrice === null || parsedP < livePrice)) {
-              livePrice = Math.round(parsedP * 100) / 100;
+          if (offersRaw) {
+            const offerList = Array.isArray(offersRaw) ? offersRaw : [offersRaw];
+            for (const off of offerList) {
+              const rawP = off?.price ?? off?.lowPrice;
+              const parsedP = typeof rawP === "number" ? rawP : parseTrPrice(String(rawP || ""));
+              if (parsedP && parsedP >= 10 && (livePrice === null || parsedP < livePrice)) {
+                livePrice = Math.round(parsedP * 100) / 100;
+              }
+              if (typeof off?.availability === "string" && /OutOfStock/i.test(off.availability)) {
+                inStock = false;
+              }
             }
-            if (typeof off?.availability === "string" && /OutOfStock/i.test(off.availability)) {
-              inStock = false;
+          }
+          if (!rating && node.aggregateRating && typeof node.aggregateRating === "object") {
+            const rv = Number.parseFloat(String(node.aggregateRating.ratingValue || "").replace(",", "."));
+            const rc = Number.parseInt(String(node.aggregateRating.reviewCount ?? node.aggregateRating.ratingCount ?? "0"), 10);
+            if (Number.isFinite(rv) && rv > 0 && rv <= 5) {
+              rating = {
+                value: Math.round(rv * 10) / 10,
+                count: Number.isFinite(rc) && rc > 0 ? rc : null,
+              };
             }
+          }
+          if (!barcode) {
+            const rawGtin = String(node.gtin13 || node.gtin14 || node.gtin12 || node.gtin || node.ean || "").replace(/\D/g, "");
+            if (rawGtin.length >= 8 && rawGtin.length <= 14) barcode = rawGtin;
+          }
+          if (!sku && (node.sku || node.mpn)) {
+            sku = String(node.sku || node.mpn).trim();
           }
           if (!ogImg && typeof node.image === "string" && /^https?:\/\//i.test(node.image)) {
             ogImg = node.image;
@@ -893,7 +953,7 @@ export async function fetchLiveProductPrice(urlStr) {
       if (!/^https?:\/\//i.test(ogImg) || /favicon|logo|placeholder/i.test(ogImg)) ogImg = "";
     }
 
-    const result = { price: livePrice, inStock, image: ogImg };
+    const result = { price: livePrice, inStock, image: ogImg, rating, barcode, sku };
     if (livePriceCache.size > 300) {
       livePriceCache.delete(livePriceCache.keys().next().value);
     }
@@ -1007,7 +1067,7 @@ export async function searchSerperTurkey(query, apiKey) {
     if (!res.ok) {
       const errTxt = await res.text().catch(() => "");
       if (res.status === 401 || res.status === 403) {
-        throw new Error("Serper API anahtarı geçersiz veya kredi tükendi. Lütfen Ayarlar (⚙) menüsünden anahtarınızı kontrol edin.");
+        throw new Error("Arama servisi geçici olarak yanıt veremedi; canlı mağaza ağıyla devam ediliyor.");
       }
       throw new Error(`Serper API yanıt hatası (HTTP ${res.status}): ${errTxt.slice(0, 120)}`);
     }
@@ -1934,7 +1994,8 @@ export async function searchSecondHandTurkey(query, options = {}) {
   }
 
   const quickLinks = buildSecondHandQuickLinks(q);
-  const serperKey = (options.serperKey || process.env.SERPER_API_KEY || "").trim();
+  const serperKeys = getSerperKeyPool(options.serperKey);
+  const serperKey = serperKeys[0] || "";
   const serpApiKey = (options.serpApiKey || process.env.SERPAPI_KEY || "").trim();
   const cacheKey = `2el:${q.toLocaleLowerCase("tr-TR")}:${serperKey ? "sp" : serpApiKey ? "sa" : "none"}`;
 
@@ -1958,7 +2019,7 @@ export async function searchSecondHandTurkey(query, options = {}) {
       items: [],
       quickLinks,
       notice:
-        "Canlı Dolap / Gardrops / sahibinden ilan fiyatlarını uygulama içinde listelemek için Ayarlar'dan ücretsiz Serper API anahtarı ekleyebilir veya aşağıdaki bağlantılarla doğrudan açabilirsiniz.",
+        "Bu arama için anlık 2. el ilan özeti bulunamadı. Aşağıdaki tek tık bağlantılarla Dolap, Gardrops ve sahibinden ilanlarını doğrudan açabilirsiniz.",
     };
   }
 
@@ -2202,8 +2263,8 @@ export async function resolveBarcode(rawCode, options = {}) {
   }
 
   // 3. Google Turkey barcode lookup via Serper (finds Turkish 869... EAN products!)
-  const serperKey = (options.serperKey || process.env.SERPER_API_KEY || "").trim();
-  if (serperKey) {
+  const serperKeys = getSerperKeyPool(options.serperKey);
+  for (const serperKey of serperKeys) {
     try {
       const res = await fetch("https://google.serper.dev/search", {
         method: "POST",
@@ -2229,9 +2290,10 @@ export async function resolveBarcode(rawCode, options = {}) {
             };
           }
         }
+        break;
       }
     } catch {
-      // Continue
+      // Rotate to next key if available
     }
   }
 
@@ -2301,13 +2363,23 @@ const ZERO_KEY_SYNONYMS = {
 };
 
 const AKINON_TR_STORES = [
-  { name: "SuperStep", baseUrl: "https://www.superstep.com.tr", freeShipThreshold: 2500, category: "Ayakkabı & Spor" },
-  { name: "FashFed", baseUrl: "https://www.fashfed.com", freeShipThreshold: 2500, category: "Moda & Ayakkabı" },
-  { name: "Intersport", baseUrl: "https://www.intersport.com.tr", freeShipThreshold: 2500, category: "Spor & Ayakkabı" },
-  { name: "Sportive", baseUrl: "https://www.sportive.com.tr", freeShipThreshold: 1500, category: "Spor & Ayakkabı" },
-  { name: "Sporjinal", baseUrl: "https://www.sporjinal.com", freeShipThreshold: 1500, category: "Spor & Ayakkabı" },
-  { name: "Koton", baseUrl: "https://www.koton.com", freeShipThreshold: 1000, category: "Moda & Giyim" },
-  { name: "Tefal Türkiye", baseUrl: "https://www.tefal.com.tr", freeShipThreshold: 1500, category: "Küçük Ev Aletleri" },
+  { name: "SuperStep", baseUrl: "https://www.superstep.com.tr", freeShipThreshold: 2500, category: "Ayakkabı & Spor", vertical: "fashion_sports" },
+  { name: "House of SuperStep", baseUrl: "https://www.houseofsuperstep.com", freeShipThreshold: 2500, category: "Sneaker & Streetwear", vertical: "fashion_sports" },
+  { name: "FashFed", baseUrl: "https://www.fashfed.com", freeShipThreshold: 2500, category: "Moda & Ayakkabı", vertical: "fashion_sports" },
+  { name: "Intersport", baseUrl: "https://www.intersport.com.tr", freeShipThreshold: 2500, category: "Spor & Ayakkabı", vertical: "fashion_sports" },
+  { name: "Barçın", baseUrl: "https://www.barcin.com", freeShipThreshold: 2000, category: "Spor & Ayakkabı", vertical: "fashion_sports" },
+  { name: "Sportive", baseUrl: "https://www.sportive.com.tr", freeShipThreshold: 1500, category: "Spor & Ayakkabı", vertical: "fashion_sports" },
+  { name: "Sporjinal", baseUrl: "https://www.sporjinal.com", freeShipThreshold: 1500, category: "Spor & Ayakkabı", vertical: "fashion_sports" },
+  { name: "Occasion", baseUrl: "https://www.occasion.com.tr", freeShipThreshold: 2500, category: "Moda & Outlet", vertical: "fashion_sports" },
+  { name: "Under Armour Türkiye", baseUrl: "https://www.underarmour.com.tr", freeShipThreshold: 2500, category: "Spor & Ayakkabı", vertical: "fashion_sports" },
+  { name: "Lacoste Türkiye", baseUrl: "https://www.lacoste.com.tr", freeShipThreshold: 2500, category: "Moda & Ayakkabı", vertical: "fashion_sports" },
+  { name: "Converse Türkiye", baseUrl: "https://www.converse.com.tr", freeShipThreshold: 2500, category: "Ayakkabı", vertical: "fashion_sports" },
+  { name: "Koton", baseUrl: "https://www.koton.com", freeShipThreshold: 1000, category: "Moda & Giyim", vertical: "fashion_sports" },
+  { name: "Marks & Spencer Türkiye", baseUrl: "https://www.marksandspencer.com.tr", freeShipThreshold: 2000, category: "Moda & Ev", vertical: "fashion_sports" },
+  { name: "GAP Türkiye", baseUrl: "https://www.gap.com.tr", freeShipThreshold: 2000, category: "Moda & Giyim", vertical: "fashion_sports" },
+  { name: "GANT Türkiye", baseUrl: "https://www.gant.com.tr", freeShipThreshold: 2500, category: "Moda & Giyim", vertical: "fashion_sports" },
+  { name: "Nautica Türkiye", baseUrl: "https://www.nautica-tr.com", freeShipThreshold: 2000, category: "Moda & Giyim", vertical: "fashion_sports" },
+  { name: "Tefal Türkiye", baseUrl: "https://www.tefal.com.tr", freeShipThreshold: 1500, category: "Küçük Ev Aletleri", vertical: "home_appliance" },
 ];
 
 function normalizeZeroKeyText(str) {
@@ -2503,6 +2575,73 @@ export function extractAkinonAvailableSizes(p) {
   return sortAvailableSizes([...found]);
 }
 
+/**
+ * Extracts real in-cart discount ("Sepette Ek İndirim") price, label, and live coupon code
+ * from Akinon product `basket_offers` array (SuperStep, Intersport, FashFed, Sportive, Koton, etc.).
+ */
+export function extractAkinonBasketOffer(p, basePrice) {
+  const offers = Array.isArray(p?.basket_offers) ? p.basket_offers : [];
+  if (!offers.length || !(typeof basePrice === "number" && basePrice > 0)) {
+    return { basketPrice: null, basketOfferLabel: "", couponCode: "" };
+  }
+
+  let bestPrice = null;
+  let bestLabel = "";
+  let bestCoupon = "";
+
+  for (const bo of offers) {
+    if (!bo || typeof bo !== "object") continue;
+    const rawLabel = String(
+      bo.label || bo.name || bo.title || bo.listing_kwargs?.label || bo.listing_kwargs?.text || ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+
+    // Look for live coupon code (e.g. "KASIM30 KODU İLE EK %30 İNDİRİM" or "KOD: SEPET20")
+    const codeMatch =
+      rawLabel.match(/\b([A-Z0-9]{4,16})\s+KOD[UI]?\b/i) ||
+      rawLabel.match(/\bKOD[UI]?\s*[:\-]?\s*([A-Z0-9]{4,16})\b/i);
+    const coupon = codeMatch?.[1] && /[A-Z]/i.test(codeMatch[1]) ? codeMatch[1].toUpperCase() : "";
+
+    // 1. Prefer exact pre-computed discounted_total_price from Akinon listing_kwargs
+    const rawDisc =
+      bo.listing_kwargs?.discounted_total_price ??
+      bo.discounted_total_price ??
+      bo.listing_kwargs?.discounted_price ??
+      bo.discounted_price;
+    let computed = typeof rawDisc === "number" ? rawDisc : parseTrPrice(rawDisc);
+
+    // 2. If only an unconditional "%X Sepette İndirim" label exists (no "ÜZERİNE" threshold), compute safely
+    if ((!computed || computed >= basePrice) && rawLabel && !/üzeri|adet|ikinci|2\.|3\./i.test(rawLabel)) {
+      const pctMatch = rawLabel.match(/%\s*(\d{1,2})\b/);
+      if (pctMatch) {
+        const pct = Number.parseInt(pctMatch[1], 10);
+        if (pct >= 5 && pct <= 60) {
+          computed = Math.round(basePrice * (1 - pct / 100) * 100) / 100;
+        }
+      }
+    }
+
+    if (computed && computed > 0 && computed < basePrice * 0.99 && computed >= basePrice * 0.3) {
+      const rounded = Math.round(computed * 100) / 100;
+      if (bestPrice === null || rounded < bestPrice) {
+        bestPrice = rounded;
+        bestLabel = rawLabel || "Sepette Ek İndirim";
+        bestCoupon = coupon || bestCoupon;
+      }
+    } else if (!bestLabel && rawLabel) {
+      bestLabel = rawLabel;
+      if (coupon && !bestCoupon) bestCoupon = coupon;
+    }
+  }
+
+  return {
+    basketPrice: bestPrice,
+    basketOfferLabel: bestLabel.slice(0, 90),
+    couponCode: bestCoupon,
+  };
+}
+
 async function fetchAkinonStore(store, query) {
   const url = `${store.baseUrl}/list/?search_text=${encodeURIComponent(query)}&format=json`;
   const res = await fetch(url, {
@@ -2541,8 +2680,29 @@ async function fetchAkinonStore(store, query) {
     const productUrl = absPath.startsWith("http")
       ? absPath
       : `${store.baseUrl}${absPath.startsWith("/") ? "" : "/"}${absPath}`;
-    const image = String(p?.productimage_set?.[0]?.image || "").trim();
+
+    const gallery = [
+      ...new Set(
+        (Array.isArray(p?.productimage_set) ? p.productimage_set : [])
+          .map((im) => String(im?.image || "").trim())
+          .filter((u) => /^https?:\/\//i.test(u))
+      ),
+    ].slice(0, 6);
+    const image = gallery[0] || "";
     const availableSizes = extractAkinonAvailableSizes(p);
+    const roundedPrice = Math.round(price * 100) / 100;
+    const basket = extractAkinonBasketOffer(p, roundedPrice);
+    const rawStock = Number.parseInt(String(p?.stock ?? ""), 10);
+    const stockCount = Number.isFinite(rawStock) && rawStock > 0 ? rawStock : null;
+    const attrs = p?.attributes || {};
+    const rawBarcode = String(
+      attrs.mp_yurtdisi_barkod ||
+        attrs.integration_yurt_disi_barkod ||
+        attrs.integration_erenp_erenbarkod ||
+        p?.barcode ||
+        ""
+    ).replace(/\D/g, "");
+    const barcode = rawBarcode.length >= 8 && rawBarcode.length <= 14 ? rawBarcode : "";
 
     out.push({
       id: `${store.name.toLowerCase().replace(/[^a-z0-9]/g, "")}-${p.pk || out.length}`,
@@ -2550,11 +2710,17 @@ async function fetchAkinonStore(store, query) {
       title,
       brand,
       code: extractModelStyleCode(rawCode, title),
-      price: Math.round(price * 100) / 100,
-      listPrice: retailPrice && retailPrice > price ? Math.round(retailPrice * 100) / 100 : null,
+      barcode,
+      price: roundedPrice,
+      basketPrice: basket.basketPrice,
+      basketOfferLabel: basket.basketOfferLabel,
+      couponCode: basket.couponCode,
+      listPrice: retailPrice && retailPrice > roundedPrice ? Math.round(retailPrice * 100) / 100 : null,
       image,
+      gallery,
       productUrl,
       inStock: p?.in_stock !== false,
+      stockCount,
       availableSizes,
       freeShipThreshold: store.freeShipThreshold,
       deliveryLabel: "Hızlı Kargo (1-3 gün)",
@@ -2564,6 +2730,296 @@ async function fetchAkinonStore(store, query) {
     });
   }
   return out;
+}
+
+/**
+ * Vertical SSR Store: Gratis (Cosmetics & Personal Care)
+ * Extracts embedded Next.js SSR JSON product catalog with real Gratis Kart / promotion prices.
+ */
+async function fetchGratis(query) {
+  const url = `https://www.gratis.com/search?q=${encodeURIComponent(query)}`;
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": UA,
+      Accept: "text/html,application/xhtml+xml",
+      "Accept-Language": "tr-TR,tr;q=0.9",
+    },
+    signal: AbortSignal.timeout(5500),
+  });
+  if (!res.ok) return [];
+  const html = await res.text();
+  if (/Just a moment|cf-browser-verification|challenge-platform/i.test(html)) return [];
+
+  const marker = '\\"products\\":[';
+  const startIdx = html.indexOf(marker);
+  if (startIdx === -1) return [];
+
+  // Extract balanced JSON array from escaped Next.js flight payload
+  const arrayStart = startIdx + marker.length - 1;
+  let depth = 0;
+  let endIdx = -1;
+  for (let i = arrayStart; i < Math.min(html.length, arrayStart + 250000); i++) {
+    const ch = html[i];
+    if (ch === "[") depth++;
+    else if (ch === "]") {
+      depth--;
+      if (depth === 0) {
+        endIdx = i + 1;
+        break;
+      }
+    }
+  }
+  if (endIdx === -1) return [];
+
+  let productsJson;
+  try {
+    const unescaped = html
+      .slice(arrayStart, endIdx)
+      .replace(/\\"/g, '"')
+      .replace(/\\u0026/g, "&")
+      .replace(/\\\\/g, "\\");
+    productsJson = JSON.parse(unescaped);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(productsJson)) return [];
+
+  const out = [];
+  for (const p of productsJson.slice(0, 24)) {
+    const title = String(p?.name || p?.title || p?.displayName || "").replace(/\s+/g, " ").trim();
+    const brand = String(p?.brand?.name || p?.brandName || "").trim();
+    const fullTitle =
+      brand && title && !title.toLowerCase().startsWith(brand.toLowerCase()) ? `${brand} ${title}` : title;
+    const shareLink = String(p?.shareLink || "").trim();
+    if (!fullTitle || !shareLink || !shareLink.startsWith("https://www.gratis.com/")) continue;
+
+    const rel = matchesZeroKeyQuery(fullTitle, brand, String(p?.id || ""), query);
+    if (!rel.ok) continue;
+
+    const pr = p?.prices || {};
+    const discRaw = typeof pr.discountedPrice === "number" ? pr.discountedPrice / 100 : parseTrPrice(pr.discountedPriceLabel);
+    const normRaw = typeof pr.normalPrice === "number" ? pr.normalPrice / 100 : parseTrPrice(pr.normalPriceLabel);
+    const promoRaw = typeof pr.promotionPrice === "number" && pr.promotionPrice > 0 ? pr.promotionPrice / 100 : parseTrPrice(pr.promotionPriceLabel);
+    const price = discRaw && discRaw > 0 ? Math.round(discRaw * 100) / 100 : normRaw ? Math.round(normRaw * 100) / 100 : null;
+    if (!price || price <= 0) continue;
+
+    const basketPrice = promoRaw && promoRaw > 0 && promoRaw < price ? Math.round(promoRaw * 100) / 100 : null;
+    const basketOfferLabel = basketPrice
+      ? String(pr.promotionLabel || pr.discountedText || "Gratis Kart İndirimi").trim()
+      : "";
+    const gallery = (Array.isArray(p?.images) ? p.images : [])
+      .map((im) => (typeof im === "string" ? im : im?.url || im?.src || ""))
+      .filter((u) => /^https?:\/\//i.test(u))
+      .slice(0, 5);
+    const image = gallery[0] || String(p?.image || p?.thumbnail || "").trim();
+
+    out.push({
+      id: `gratis-${p.id || out.length}`,
+      storeName: "Gratis",
+      title: fullTitle,
+      brand,
+      code: extractModelStyleCode(String(p?.sku || ""), fullTitle),
+      price,
+      basketPrice,
+      basketOfferLabel,
+      couponCode: "",
+      listPrice: normRaw && normRaw > price ? Math.round(normRaw * 100) / 100 : null,
+      image: /^https?:\/\//i.test(image) ? image : "",
+      gallery,
+      productUrl: shareLink,
+      inStock: p?.stockStatus !== "OUT_OF_STOCK",
+      freeShipThreshold: 750,
+      deliveryLabel: "Hızlı Kargo (1-3 gün)",
+      deliveryDays: 2,
+      category: "Kozmetik & Kişisel Bakım",
+      relevanceScore: rel.score,
+    });
+  }
+  return out;
+}
+
+/**
+ * Vertical SSR Store: Gaming.Gen.TR (PC Hardware, Laptops & Gaming Gear)
+ * Parses live WooCommerce search results with direct /urun/ product links.
+ */
+async function fetchGamingGenTr(query) {
+  const url = `https://www.gaming.gen.tr/?s=${encodeURIComponent(query)}&post_type=product`;
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": UA,
+      Accept: "text/html,application/xhtml+xml",
+      "Accept-Language": "tr-TR,tr;q=0.9",
+    },
+    signal: AbortSignal.timeout(5500),
+  });
+  if (!res.ok) return [];
+  const html = await res.text();
+  if (/Just a moment|cf-browser-verification|challenge-platform/i.test(html)) return [];
+
+  const $ = cheerio.load(html);
+  const out = [];
+  const seen = new Set();
+
+  $("li.product, .product-grid-item, .products .product").slice(0, 24).each((idx, el) => {
+    const $el = $(el);
+    const linkEl = $el.find('a[href*="/urun/"]').first();
+    const href = String(linkEl.attr("href") || "").trim();
+    if (!href || seen.has(href)) return;
+
+    const title = (
+      $el.find(".woocommerce-loop-product__title, h2, h3, .product-title").first().text() ||
+      linkEl.attr("title") ||
+      ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!title || title.length < 4) return;
+
+    const rel = matchesZeroKeyQuery(title, "", "", query);
+    if (!rel.ok) return;
+
+    // WooCommerce shows <del>old</del> <ins>sale</ins> or single .woocommerce-Price-amount
+    const insPriceText = $el.find("ins .woocommerce-Price-amount").first().text().trim();
+    const delPriceText = $el.find("del .woocommerce-Price-amount").first().text().trim();
+    const fallbackPriceText = $el.find(".woocommerce-Price-amount").last().text().trim();
+    const price = parseTrPrice(insPriceText || fallbackPriceText);
+    if (!price || price <= 0) return;
+    const listPrice = parseTrPrice(delPriceText);
+
+    const imgEl = $el.find("img").first();
+    const image = String(imgEl.attr("data-src") || imgEl.attr("data-lazy-src") || imgEl.attr("src") || "").trim();
+    seen.add(href);
+
+    out.push({
+      id: `gaminggen-${idx + 1}`,
+      storeName: "Gaming.Gen.TR",
+      title,
+      brand: "",
+      code: extractModelStyleCode("", title),
+      price: Math.round(price * 100) / 100,
+      listPrice: listPrice && listPrice > price ? Math.round(listPrice * 100) / 100 : null,
+      image: /^https?:\/\//i.test(image) ? image : "",
+      productUrl: href,
+      inStock: !$el.hasClass("outofstock"),
+      freeShipThreshold: 1500,
+      deliveryLabel: "Hızlı Kargo (1-3 gün)",
+      deliveryDays: 2,
+      category: "PC & Oyuncu Donanım",
+      relevanceScore: rel.score,
+    });
+  });
+
+  return out;
+}
+
+/**
+ * Category-aware zero-key store router to keep Render Free (0.1 vCPU / 512 MB RAM) fast and lean.
+ * Only queries the vertical stores relevant to the user's query instead of blasting all 23 stores blindly.
+ */
+export function selectZeroKeyStoresForQuery(query) {
+  const qNorm = normalizeZeroKeyText(query);
+  const isGrocery =
+    /\b(kahve|cay|sut|peynir|zeytinyagi|aycicek|yag|deterjan|bebek\s*bezi|prima|nutella|makarna|un|seker|pirinc|cikolata|biskuvi|su|kola|meyve\s*suyu|yogurt|tereyagi|yumurta|tuvalet\s*kagidi|kagit\s*havlu|lavazza|nescafe|jacobs|tchibo|ulker|eti|sutas|pinar|torku)\b/.test(
+      qNorm
+    );
+  const isCosmetics =
+    /\b(parfum|edp|edt|maskara|ruj|fondoten|krem|serum|sampuan|deodorant|gunes\s*kremi|cilt|makyaj|allik|eyeliner|kapatıcı|kapatici|tonik|loreal|maybelline|nivea|garnier|cerave|la\s*roche|dior|chanel|ysl|lancome|gratis|sephora)\b/.test(
+      qNorm
+    );
+  const isTechGaming =
+    /\b(iphone|samsung|galaxy|xiaomi|redmi|macbook|laptop|notebook|tablet|ipad|airpods|kulaklik|watch|monitor|rtx|geforce|radeon|ekran\s*karti|islemci|ryzen|intel|anakart|ram|ddr5|ssd|nvme|klavye|mouse|fare|oyuncu|gaming|ps5|playstation|xbox|nintendo|kamera|televizyon|tv|asus|msi|lenovo|acer|logitech|razer|steelseries|hyperx|corsair)\b/.test(
+      qNorm
+    );
+  const isHomeAppliance =
+    /\b(airfryer|fritoz|supurge|dyson|tefal|philips|blender|tost|kahve\s*makinesi|utu|kettle|su\s*isitici|tencere|tava|duduklu|robot\s*supurge|mikser|cayci|mutfak\s*sefi|klima|buzdolabi|camasir|bulasik)\b/.test(
+      qNorm
+    );
+  const isFashionSports =
+    /\b(ayakkabi|sneaker|bot|sandalet|terlik|krampon|tisort|tshirt|gomlek|pantolon|jean|ceket|mont|kaban|sweatshirt|hoodie|esofman|sort|elbise|etek|kazak|hirka|canta|gozluk|adidas|nike|puma|new\s*balance|converse|lacoste|vans|skechers|asics|salomon|under\s*armour|reebok|timberland|north\s*face|columbia|koton|gant|gap|nautica|marks|rayban|samba|gazelle|superstar|air\s*force|jordan)\b/.test(
+      qNorm
+    );
+
+  // If multiple or none match, return a balanced general set
+  if (isGrocery && !isTechGaming && !isFashionSports) {
+    return {
+      vertical: "grocery",
+      akinonStores: [],
+      beymen: false,
+      dr: false,
+      gratis: false,
+      gamingGen: false,
+      marketFiyati: true,
+      migrosElec: false,
+      migrosMarket: true,
+    };
+  }
+  if (isCosmetics && !isTechGaming && !isFashionSports) {
+    return {
+      vertical: "cosmetics",
+      akinonStores: AKINON_TR_STORES.filter((s) => ["FashFed", "Koton"].includes(s.name)),
+      beymen: true,
+      dr: false,
+      gratis: true,
+      gamingGen: false,
+      marketFiyati: true,
+      migrosElec: false,
+      migrosMarket: true,
+    };
+  }
+  if (isTechGaming && !isFashionSports) {
+    return {
+      vertical: "tech_gaming",
+      akinonStores: [],
+      beymen: false,
+      dr: true,
+      gratis: false,
+      gamingGen: true,
+      marketFiyati: false,
+      migrosElec: true,
+      migrosMarket: false,
+    };
+  }
+  if (isHomeAppliance && !isFashionSports && !isTechGaming) {
+    return {
+      vertical: "home_appliance",
+      akinonStores: AKINON_TR_STORES.filter((s) => s.vertical === "home_appliance"),
+      beymen: false,
+      dr: true,
+      gratis: false,
+      gamingGen: false,
+      marketFiyati: false,
+      migrosElec: true,
+      migrosMarket: false,
+    };
+  }
+  if (isFashionSports) {
+    return {
+      vertical: "fashion_sports",
+      akinonStores: AKINON_TR_STORES.filter((s) => s.vertical === "fashion_sports"),
+      beymen: true,
+      dr: false,
+      gratis: false,
+      gamingGen: false,
+      marketFiyati: false,
+      migrosElec: false,
+      migrosMarket: false,
+    };
+  }
+
+  // General fallback: balanced top stores across verticals
+  return {
+    vertical: "general",
+    akinonStores: AKINON_TR_STORES.filter((s) =>
+      ["SuperStep", "FashFed", "Intersport", "Barçın", "Sportive", "Koton", "Tefal Türkiye"].includes(s.name)
+    ),
+    beymen: true,
+    dr: true,
+    gratis: true,
+    gamingGen: true,
+    marketFiyati: true,
+    migrosElec: true,
+    migrosMarket: true,
+  };
 }
 
 async function fetchBeymen(query) {
@@ -2725,8 +3181,9 @@ async function fetchDrStore(query) {
 }
 
 /**
- * Merges identical zero-key store items across Turkish retailers by manufacturer model code
- * (e.g. KI4392 on Intersport + SuperStep) or normalized title, building full FiyatRadar detail payloads.
+ * Merges identical zero-key store items across Turkish retailers by EAN-13 barcode,
+ * manufacturer model code (e.g. KI4392 on Intersport + SuperStep), or normalized title,
+ * building full FiyatRadar detail payloads with basket discounts, coupons, stock urgency & gallery.
  */
 export function mergeZeroKeyStoreItems(rawItems, query) {
   const groups = new Map();
@@ -2737,7 +3194,11 @@ export function mergeZeroKeyStoreItems(rawItems, query) {
       .filter((w) => !ZERO_KEY_STOP_WORDS.has(w))
       .slice(0, 7)
       .join(" ");
-    const groupKey = item.code ? `code:${item.code}` : `title:${titleKey}`;
+    const groupKey = item.barcode
+      ? `ean:${item.barcode}`
+      : item.code
+        ? `code:${item.code}`
+        : `title:${titleKey}`;
     if (!groups.has(groupKey)) {
       groups.set(groupKey, []);
     }
@@ -2749,17 +3210,22 @@ export function mergeZeroKeyStoreItems(rawItems, query) {
   let groupSeq = 0;
 
   for (const [, items] of groups.entries()) {
-    // Keep cheapest offer per store within the merged product
+    // Keep cheapest effective offer per store within the merged product
+    const effectivePriceOf = (it) =>
+      typeof it.basketPrice === "number" && it.basketPrice > 0 && it.basketPrice < it.price
+        ? it.basketPrice
+        : it.price;
+
     const perStore = new Map();
     for (const it of items) {
       const sKey = it.storeName.toLowerCase();
       const prev = perStore.get(sKey);
-      if (!prev || it.price < prev.price) {
+      if (!prev || effectivePriceOf(it) < effectivePriceOf(prev)) {
         perStore.set(sKey, it);
       }
     }
 
-    const storeItems = [...perStore.values()].sort((a, b) => a.price - b.price);
+    const storeItems = [...perStore.values()].sort((a, b) => effectivePriceOf(a) - effectivePriceOf(b));
     if (!storeItems.length) continue;
 
     groupSeq++;
@@ -2767,16 +3233,46 @@ export function mergeZeroKeyStoreItems(rawItems, query) {
     const bestImage = storeItems.find((x) => x.image)?.image || "";
     const bestBrand = storeItems.find((x) => x.brand)?.brand || "";
     const bestCode = storeItems.find((x) => x.code)?.code || "";
+    const bestBarcode = storeItems.find((x) => x.barcode)?.barcode || "";
+    const bestGallery = [
+      ...new Set(storeItems.flatMap((x) => (Array.isArray(x.gallery) ? x.gallery : x.image ? [x.image] : []))),
+    ].slice(0, 6);
     const isAccessory = isAccessoryTitle(best.title, query);
     const maxRelevance = Math.max(...storeItems.map((x) => x.relevanceScore || 0));
 
     const offers = storeItems.map((it, idx) => {
-      const isFreeShip = it.price >= (it.freeShipThreshold || 1500);
+      const effPrice = effectivePriceOf(it);
+      const isFreeShip = effPrice >= (it.freeShipThreshold || 1500);
       const shippingCost = isFreeShip ? 0 : 59.9;
+      const promoParts = [];
+      if (it.basketPrice && it.basketPrice < it.price) {
+        promoParts.push(
+          `${it.basketOfferLabel || "Sepette İndirim"} (Vitrin: ${it.price.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL)`
+        );
+      } else if (it.basketOfferLabel) {
+        promoParts.push(it.basketOfferLabel);
+      }
+      if (it.couponCode) {
+        promoParts.push(`Kupon: ${it.couponCode}`);
+      }
+      if (it.listPrice && it.listPrice > it.price) {
+        promoParts.push(`Liste: ${it.listPrice.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL`);
+      }
+
+      const stockLabel =
+        it.inStock === false
+          ? "Stok yok"
+          : typeof it.stockCount === "number" && it.stockCount > 0 && it.stockCount <= 3
+            ? `Son ${it.stockCount} adet`
+            : "Stokta";
+
       return {
         id: `${it.id}-${idx + 1}`,
         offerTitle: it.title,
-        basePrice: it.price,
+        basePrice: effPrice,
+        stickerPrice: it.basketPrice && it.basketPrice < it.price ? it.price : null,
+        basketOfferLabel: it.basketOfferLabel || "",
+        couponCode: it.couponCode || "",
         shipping: {
           cost: shippingCost,
           isFree: isFreeShip,
@@ -2785,15 +3281,14 @@ export function mergeZeroKeyStoreItems(rawItems, query) {
         },
         store: parseStoreInfo(it.storeName, ""),
         storeLogo: null,
-        stockText: it.inStock ? "Stokta" : "Kontrol edin",
-        inStock: it.inStock,
+        stockText: stockLabel,
+        stockCount: it.stockCount ?? null,
+        inStock: it.inStock !== false,
         delivery: { label: it.deliveryLabel || "Kargo ile teslimat", days: it.deliveryDays ?? 2, score: 0.84 },
         lastUpdated: "Canlı Doğrulandı",
         priceVerified: true,
-        priceSource: "live_verified",
-        promoNote: it.listPrice
-          ? `Liste fiyatı: ${it.listPrice.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL`
-          : "",
+        priceSource: it.basketPrice && it.basketPrice < it.price ? "basket_live" : "live_verified",
+        promoNote: promoParts.join(" · "),
         akakceBadge: "",
         url: it.productUrl,
         isDirectLink: true,
@@ -2817,6 +3312,8 @@ export function mergeZeroKeyStoreItems(rawItems, query) {
       for (const sz of x.availableSizes || []) mergedSizesSet.add(sz);
     }
     const availableSizes = sortAvailableSizes([...mergedSizesSet]);
+    const bestBasketItem = storeItems.find((x) => x.basketPrice && x.basketPrice < x.price) || storeItems.find((x) => x.couponCode);
+    const lowStockItem = storeItems.find((x) => typeof x.stockCount === "number" && x.stockCount > 0 && x.stockCount <= 3);
 
     saveVirtualDetail(vKey, {
       id: `trnet-${groupSeq}-${bestCode || best.id}`,
@@ -2826,6 +3323,7 @@ export function mergeZeroKeyStoreItems(rawItems, query) {
       description: `${best.title} — ${storeListText} canlı yetkili mağaza fiyatları.`,
       url: vKey,
       image: bestImage,
+      gallery: bestGallery,
       rating: null,
       totalOfferCount: offers.length,
       unitInfo: unitInfo ? extractUnitInfo(best.title, analysis.stats?.minNet ?? minPrice) : null,
@@ -2846,10 +3344,16 @@ export function mergeZeroKeyStoreItems(rawItems, query) {
       verdict: histAnalysis.verdict,
       variants: [],
       availableSizes,
+      barcode: bestBarcode || null,
+      basketOfferLabel: bestBasketItem?.basketOfferLabel || "",
+      couponCode: bestBasketItem?.couponCode || "",
       specs: [
         ...(bestCode ? [{ name: "Ürün / Model Kodu", value: bestCode }] : []),
+        ...(bestBarcode ? [{ name: "EAN-13 Barkod", value: bestBarcode }] : []),
         ...(bestBrand ? [{ name: "Marka", value: bestBrand }] : []),
         ...(availableSizes.length ? [{ name: "Stoktaki Beden / Numaralar", value: availableSizes.join(", ") }] : []),
+        ...(bestBasketItem?.basketOfferLabel ? [{ name: "Sepet Kampanyası", value: bestBasketItem.basketOfferLabel }] : []),
+        ...(bestBasketItem?.couponCode ? [{ name: "Canlı Kupon Kodu", value: bestBasketItem.couponCode }] : []),
         ...(refListPrice && refListPrice > minPrice
           ? [{ name: "İndirimsiz Liste Fiyatı", value: `${refListPrice.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL` }]
           : []),
@@ -2864,7 +3368,13 @@ export function mergeZeroKeyStoreItems(rawItems, query) {
       isListingPage: false,
       image: bestImage,
       lowestPrice: minPrice,
-      priceSource: "live_verified",
+      stickerPrice: best.basketPrice && best.basketPrice < best.price ? best.price : null,
+      basketOfferLabel: bestBasketItem?.basketOfferLabel || "",
+      couponCode: bestBasketItem?.couponCode || "",
+      stockCount: lowStockItem?.stockCount ?? null,
+      barcode: bestBarcode || "",
+      modelCode: bestCode || "",
+      priceSource: best.basketPrice && best.basketPrice < best.price ? "basket_live" : "live_verified",
       priceVerified: true,
       availableSizes,
       offerCount: offers.length,
@@ -2891,8 +3401,8 @@ export function mergeZeroKeyStoreItems(rawItems, query) {
 
 /**
  * Combines real-time live official Turkish store results (100% live checkout prices)
- * with Serper/SerpAPI Google TR direct store results, always preferring the live store
- * API price over any stale Google SERP snippet for matching URLs.
+ * with Serper/SerpAPI Google TR direct store results, preferring live store API prices
+ * on matching URLs/barcodes and enriching the "Tüm Mağazalar" summary card with live offers.
  */
 export function mergeLiveAndSerperResults(serperResult, liveResult) {
   const serperProds = Array.isArray(serperResult?.products) ? serperResult.products : [];
@@ -2901,8 +3411,10 @@ export function mergeLiveAndSerperResults(serperResult, liveResult) {
   if (!serperProds.length) return liveResult;
 
   const liveUrlSet = new Set();
+  const liveBarcodeSet = new Set();
   for (const lp of liveProds) {
     if (lp.externalUrl) liveUrlSet.add(normalizeUrlForMatch(lp.externalUrl));
+    if (lp.barcode) liveBarcodeSet.add(lp.barcode);
   }
 
   // Compute median of live verified prices so wildly stale/wrong unverified Google snippets
@@ -2933,7 +3445,51 @@ export function mergeLiveAndSerperResults(serperResult, liveResult) {
     return true;
   });
 
+  // Enrich the "Tüm Mağazalar" aggregate detail with top live zero-key offers so users see all stores together
   const summaryCards = filteredSerper.filter((p) => p.badge === "Tüm Mağazalar");
+  if (summaryCards.length === 1 && summaryCards[0].url) {
+    const aggKey = summaryCards[0].url;
+    const aggDetail = getVirtualDetail(aggKey);
+    if (aggDetail && Array.isArray(aggDetail.offers)) {
+      const seenOfferUrls = new Set(aggDetail.offers.map((o) => normalizeUrlForMatch(o.url || "")));
+      const extraOffers = [];
+      for (const lp of liveProds.filter((p) => !p.isAccessory).slice(0, 12)) {
+        const lDet = getVirtualDetail(lp.url);
+        for (const lo of lDet?.offers || []) {
+          const uKey = normalizeUrlForMatch(lo.url || "");
+          if (!uKey || seenOfferUrls.has(uKey)) continue;
+          seenOfferUrls.add(uKey);
+          extraOffers.push(lo);
+        }
+      }
+      if (extraOffers.length > 0) {
+        const combinedOffers = [...aggDetail.offers, ...extraOffers];
+        const reAnalysis = analyzeOffers(combinedOffers, aggDetail.unitInfo || null, {
+          productTitle: aggDetail.title,
+          category: aggDetail.category,
+        });
+        saveVirtualDetail(aggKey, {
+          ...aggDetail,
+          totalOfferCount: combinedOffers.length,
+          lowPrice: reAnalysis.stats?.minNet ?? aggDetail.lowPrice,
+          highPrice: reAnalysis.stats?.maxNet ?? aggDetail.highPrice,
+          stats: reAnalysis.stats,
+          picks: reAnalysis.picks,
+          shippingTraps: reAnalysis.shippingTraps,
+          platformBreakdown: reAnalysis.platformBreakdown,
+          trustSummary: reAnalysis.trustSummary,
+          offers: reAnalysis.offers,
+          provider: `${aggDetail.provider || "Google Türkiye"} + Canlı Mağazalar`,
+        });
+        summaryCards[0] = {
+          ...summaryCards[0],
+          lowestPrice: reAnalysis.stats?.minNet ?? summaryCards[0].lowestPrice,
+          offerCount: combinedOffers.length,
+        };
+      }
+    }
+  }
+
   const serperDirect = filteredSerper.filter((p) => p.badge !== "Tüm Mağazalar" && !p.isListingPage);
   const serperListings = filteredSerper.filter((p) => p.isListingPage);
 
@@ -2949,26 +3505,39 @@ export function mergeLiveAndSerperResults(serperResult, liveResult) {
 }
 
 /**
- * Provider 3 (Zero-Key Cloud-Proof Official Turkish Store Network):
+ * Provider 3 (Zero-Key Cloud-Proof Official Turkish Store Network — 23 Live Stores):
  * Works out-of-the-box on any cloud IP (Render, Railway, Fly, etc.) with ZERO API key!
- * Queries in parallel:
- * - Akinon Official JSON Storefronts (SuperStep, FashFed, Intersport, Sportive, Sporjinal, Koton, Tefal TR)
- * - Beymen (luxury fashion, shoes, perfumes, cosmetics, sunglasses)
- * - D&R (Apple, electronics, headphones, gaming, books)
- * - Migros Elektronik & Migros Sanal Market REST API
- * - T.C. Ticaret Bakanlığı / TÜBİTAK Market Fiyatı Official API (A101, BİM, CarrefourSA, Migros, ŞOK...)
+ * Uses category-aware store routing so Render Free stays fast and lean.
  */
-export async function searchOfficialFallback(query) {
-  const [akinonBatches, beymenItems, drItems, marketItems, migrosElec, migrosMarket] = await Promise.all([
-    Promise.all(AKINON_TR_STORES.map((store) => fetchAkinonStore(store, query).catch(() => []))),
-    fetchBeymen(query).catch(() => []),
-    fetchDrStore(query).catch(() => []),
-    fetchMarketFiyati(query).catch(() => []),
-    fetchMigros(query, "elektronik").catch(() => []),
-    fetchMigros(query, "market").catch(() => []),
+export async function searchOfficialFallback(query, options = {}) {
+  const route = selectZeroKeyStoresForQuery(query);
+  const [
+    akinonBatches,
+    beymenItems,
+    drItems,
+    gratisItems,
+    gamingGenItems,
+    marketItems,
+    migrosElec,
+    migrosMarket,
+  ] = await Promise.all([
+    Promise.all(route.akinonStores.map((store) => fetchAkinonStore(store, query).catch(() => []))),
+    route.beymen ? fetchBeymen(query).catch(() => []) : Promise.resolve([]),
+    route.dr ? fetchDrStore(query).catch(() => []) : Promise.resolve([]),
+    route.gratis ? fetchGratis(query).catch(() => []) : Promise.resolve([]),
+    route.gamingGen ? fetchGamingGenTr(query).catch(() => []) : Promise.resolve([]),
+    route.marketFiyati ? fetchMarketFiyati(query, options.location || {}).catch(() => []) : Promise.resolve([]),
+    route.migrosElec ? fetchMigros(query, "elektronik").catch(() => []) : Promise.resolve([]),
+    route.migrosMarket ? fetchMigros(query, "market").catch(() => []) : Promise.resolve([]),
   ]);
 
-  const flatRetailItems = [...akinonBatches.flat(), ...beymenItems, ...drItems];
+  const flatRetailItems = [
+    ...akinonBatches.flat(),
+    ...beymenItems,
+    ...drItems,
+    ...gratisItems,
+    ...gamingGenItems,
+  ];
   const mergedRetail = mergeZeroKeyStoreItems(flatRetailItems, query);
 
   const combined = [];
@@ -3008,6 +3577,7 @@ export async function searchOfficialFallback(query) {
   return {
     query,
     provider: providerLabel,
+    vertical: route.vertical,
     fallbackMode: true,
     directProduct: false,
     fetchedAt: new Date().toISOString(),
@@ -3017,7 +3587,30 @@ export async function searchOfficialFallback(query) {
   };
 }
 
-async function fetchMarketFiyati(query) {
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
+}
+
+async function fetchMarketFiyati(query, locOpts = {}) {
+  const payload = { keywords: query, pages: 0, size: 20 };
+  const hasCoords =
+    typeof locOpts.lat === "number" &&
+    Number.isFinite(locOpts.lat) &&
+    typeof locOpts.lng === "number" &&
+    Number.isFinite(locOpts.lng);
+  if (hasCoords) {
+    payload.latitude = locOpts.lat;
+    payload.longitude = locOpts.lng;
+    payload.distance = Math.min(25, Math.max(1, Number(locOpts.distance) || 5));
+  }
+
   const res = await fetch("https://api.marketfiyati.org.tr/api/v2/search", {
     method: "POST",
     headers: {
@@ -3025,7 +3618,7 @@ async function fetchMarketFiyati(query) {
       "User-Agent": UA,
       Accept: "application/json",
     },
-    body: JSON.stringify({ keywords: query, pages: 0, size: 20 }),
+    body: JSON.stringify(payload),
     signal: AbortSignal.timeout(8000),
   });
   if (!res.ok) return [];
@@ -3050,18 +3643,34 @@ async function fetchMarketFiyati(query) {
 
     const chainOffers = [...byChain.values()].map((d, idx) => {
       const marketLabel = MARKET_NAMES[d.chainKey] || d.marketAdi || "Market";
+      let distKm = null;
+      if (hasCoords && typeof d.latitude === "number" && typeof d.longitude === "number") {
+        distKm = haversineKm(locOpts.lat, locOpts.lng, d.latitude, d.longitude);
+      }
+      const promoParts = [];
+      if (d.discount && d.discountlessPrice) {
+        promoParts.push(`İndirimsiz: ${Number(d.discountlessPrice).toLocaleString("tr-TR")} TL`);
+      }
+      if (typeof d.discountRatio === "number" && d.discountRatio > 0) {
+        promoParts.push(`%${Math.round(d.discountRatio)} indirim`);
+      }
+      if (d.promotionText && String(d.promotionText).trim()) {
+        promoParts.push(String(d.promotionText).trim());
+      }
+      const depotDisplay = distKm !== null ? `${d.depotName || "Şube"} (${distKm} km)` : d.depotName || "";
+
       return {
         id: `mf-${item.id}-${idx + 1}`,
         offerTitle: item.title,
         basePrice: d.price,
         shipping: { cost: 0, isFree: true, label: "Mağaza / Market Fiyatı", unknown: false },
-        store: parseStoreInfo(marketLabel, d.depotName || ""),
+        store: parseStoreInfo(marketLabel, depotDisplay),
         storeLogo: null,
         stockText: "Mağazada",
         inStock: true,
-        delivery: { label: "Şube / Online", days: 0, score: 0.9 },
+        delivery: { label: distKm !== null ? `${distKm} km · Şube` : "Şube / Online", days: 0, score: 0.9 },
         lastUpdated: d.indexTime || "",
-        promoNote: d.discount && d.discountlessPrice ? `İndirimsiz: ${d.discountlessPrice.toLocaleString("tr-TR")} TL` : "",
+        promoNote: promoParts.join(" · "),
         akakceBadge: "",
         url: `https://marketfiyati.org.tr/ara?q=${encodeURIComponent(item.title)}`,
         isDirectLink: true,
@@ -3072,8 +3681,23 @@ async function fetchMarketFiyati(query) {
 
     const vKey = `virtual:mf:${item.id}`;
     const minPrice = Math.min(...chainOffers.map((o) => o.basePrice));
-    const unitInfo = extractUnitInfo(item.title, minPrice);
-    const analysis = analyzeOffers(chainOffers, unitInfo, { productTitle: item.title, category: "Market" });
+    const volumeStr = String(item.refinedVolumeOrWeight || "").trim();
+    const officialUnitStr = String(
+      depots.find((d) => d.unitPrice)?.unitPrice || item.unitPrice || ""
+    ).trim();
+    const parsedUnit = extractUnitInfo(`${item.title} ${volumeStr}`.trim(), minPrice);
+    const unitInfo =
+      parsedUnit ||
+      (officialUnitStr
+        ? {
+            formatted: officialUnitStr,
+            rawMatch: volumeStr || officialUnitStr,
+            unitPrice: null,
+            unitLabel: "",
+            quantity: 0,
+          }
+        : null);
+    const analysis = analyzeOffers(chainOffers, parsedUnit, { productTitle: item.title, category: "Market" });
     const histAnalysis = analyzePriceHistory([], analysis.stats?.minNet ?? minPrice);
 
     saveVirtualDetail(vKey, {
@@ -3086,7 +3710,7 @@ async function fetchMarketFiyati(query) {
       image: item.imageUrl || "",
       rating: null,
       totalOfferCount: chainOffers.length,
-      unitInfo: unitInfo ? extractUnitInfo(item.title, analysis.stats?.minNet ?? minPrice) : null,
+      unitInfo: parsedUnit ? extractUnitInfo(`${item.title} ${volumeStr}`.trim(), analysis.stats?.minNet ?? minPrice) : unitInfo,
       fetchedAt: new Date().toISOString(),
       cached: false,
       provider: "T.C. Market Fiyatı (TÜBİTAK)",
@@ -3102,9 +3726,10 @@ async function fetchMarketFiyati(query) {
       historySummary: null,
       verdict: histAnalysis.verdict,
       variants: [],
-      specs: item.refinedQuantityUnit
-        ? [{ name: "Miktar / Birim", value: item.refinedQuantityUnit }]
-        : [],
+      specs: [
+        ...(volumeStr ? [{ name: "Miktar / Ağırlık", value: volumeStr }] : []),
+        ...(officialUnitStr ? [{ name: "Resmi Birim Fiyat", value: officialUnitStr }] : []),
+      ],
     });
 
     products.push({
@@ -3122,6 +3747,12 @@ async function fetchMarketFiyati(query) {
 
   return products;
 }
+
+const MIGROS_BADGE_LABELS = {
+  GREAT_PRICE: "Harika Fiyat",
+  DELIST_SALEABLE: "Stok Eritme Fırsatı",
+  NEW_PRODUCT: "Yeni Ürün",
+};
 
 async function fetchMigros(query, vertical = "elektronik") {
   const endpoint =
@@ -3146,14 +3777,36 @@ async function fetchMigros(query, vertical = "elektronik") {
     const title = String(it.name || "").trim();
     if (!title) continue;
 
-    const image =
-      it.images?.[0]?.urls?.PRODUCT_DETAIL ||
-      it.images?.[0]?.urls?.PRODUCT_LIST ||
-      "";
+    // Relevance guard so unrelated Migros recommendations don't pollute search results
+    const rel = matchesZeroKeyQuery(title, it.brand?.name || "", String(it.sku || ""), query);
+    if (!rel.ok) continue;
+
+    const gallery = (Array.isArray(it.images) ? it.images : [])
+      .map((im) => im?.urls?.PRODUCT_DETAIL || im?.urls?.PRODUCT_LIST || "")
+      .filter((u) => /^https?:\/\//i.test(u))
+      .slice(0, 6);
+    const image = gallery[0] || "";
     const directUrl =
       vertical === "elektronik"
         ? `https://www.migros.com.tr/elektronik/${it.prettyName}`
         : `https://www.migros.com.tr/${it.prettyName}`;
+
+    const badgeLabels = [
+      ...new Set(
+        (Array.isArray(it.badges) ? it.badges : [])
+          .map((b) => MIGROS_BADGE_LABELS[b?.name || b] || "")
+          .filter(Boolean)
+      ),
+    ];
+    const crmTags = (Array.isArray(it.crmDiscountTags) ? it.crmDiscountTags : [])
+      .map((t) => String(t?.tag || t?.name || (typeof t === "string" ? t : "")).trim())
+      .filter(Boolean);
+    const promoParts = [];
+    if (crmTags.length) promoParts.push(crmTags[0]);
+    if (badgeLabels.length) promoParts.push(badgeLabels[0]);
+    if (regularPrice && regularPrice > price) {
+      promoParts.push(`Liste: ${regularPrice.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL`);
+    }
 
     const vKey = `virtual:migros:${vertical}:${it.id}`;
     const platformLabel = vertical === "elektronik" ? "Migros Ekstra" : "Migros Sanal Market";
@@ -3173,17 +3826,20 @@ async function fetchMigros(query, vertical = "elektronik") {
       inStock: it.status === "IN_SALE",
       delivery: { label: vertical === "elektronik" ? "Kargo ile teslimat" : "Aynı gün teslimat", days: vertical === "elektronik" ? 2 : 0, score: vertical === "elektronik" ? 0.78 : 0.98 },
       lastUpdated: "Canlı",
-      promoNote:
-        regularPrice && regularPrice > price
-          ? `Liste fiyatı: ${regularPrice.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL`
-          : "",
+      promoNote: promoParts.join(" · "),
       akakceBadge: "",
       url: directUrl,
       isDirectLink: true,
     };
 
-    const unitInfo = extractUnitInfo(title, price);
-    const analysis = analyzeOffers([offer], unitInfo, { productTitle: title, category: platformLabel });
+    const parsedUnit = extractUnitInfo(title, price);
+    const officialUnitText = String(it.unitPrice || "").replace(/^\(|\)$/g, "").trim();
+    const unitInfo =
+      parsedUnit ||
+      (officialUnitText
+        ? { formatted: officialUnitText, rawMatch: officialUnitText, unitPrice: null, unitLabel: "", quantity: 0 }
+        : null);
+    const analysis = analyzeOffers([offer], parsedUnit, { productTitle: title, category: platformLabel });
     const histAnalysis = analyzePriceHistory([], price, null, {
       medianNet: analysis.stats?.medianNet ?? price,
       listPrice: regularPrice && regularPrice > price ? regularPrice : null,
@@ -3197,6 +3853,7 @@ async function fetchMigros(query, vertical = "elektronik") {
       description: `${title} — ${platformLabel} canlı fiyatı.`,
       url: vKey,
       image,
+      gallery,
       rating: null,
       totalOfferCount: 1,
       unitInfo,
@@ -3216,20 +3873,33 @@ async function fetchMigros(query, vertical = "elektronik") {
       fakeDiscount: histAnalysis.fakeDiscount,
       verdict: histAnalysis.verdict,
       variants: [],
-      specs: regularPrice && regularPrice > price
-        ? [{ name: "İndirimsiz Liste Fiyatı", value: `${regularPrice.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL` }]
-        : [],
+      specs: [
+        ...(officialUnitText ? [{ name: "Birim Fiyat", value: officialUnitText }] : []),
+        ...(crmTags.length ? [{ name: "Money / Kampanya", value: crmTags.join(" · ") }] : []),
+        ...(badgeLabels.length ? [{ name: "Migros Etiketi", value: badgeLabels.join(", ") }] : []),
+        ...(regularPrice && regularPrice > price
+          ? [{ name: "İndirimsiz Liste Fiyatı", value: `${regularPrice.toLocaleString("tr-TR", { minimumFractionDigits: 2 })} TL` }]
+          : []),
+      ],
     });
 
     products.push({
       id: `mg-${it.id}`,
       title,
       url: vKey,
+      externalUrl: directUrl,
+      isListingPage: false,
       image,
       lowestPrice: price,
+      priceVerified: true,
+      priceSource: "live_verified",
       offerCount: 1,
       badge: platformLabel,
       source: platformLabel,
+      basketOfferLabel: crmTags[0] || badgeLabels[0] || "",
+      isOfficialStore: true,
+      isFreeShipping: price >= 500,
+      isAccessory: isAccessoryTitle(title, query),
       unitInfo,
     });
   }

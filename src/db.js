@@ -277,17 +277,49 @@ export function clearSearchHistory() {
   saveJson();
 }
 
+const SNAPSHOT_THROTTLE_MS = 6 * 60 * 60 * 1000;
+
 export function recordSnapshot(productId, netPrice, bestStore, offerCount) {
   if (!productId || !Number.isFinite(netPrice)) return;
-  const now = new Date().toISOString();
+  const key = String(productId);
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+
   if (db) {
+    const last = db
+      .prepare(
+        `SELECT net_price, captured_at FROM price_snapshots
+         WHERE product_id = ? ORDER BY captured_at DESC LIMIT 1`
+      )
+      .get(key);
+    if (
+      last &&
+      Math.abs(Number(last.net_price) - netPrice) < 0.01 &&
+      nowMs - Date.parse(last.captured_at) < SNAPSHOT_THROTTLE_MS
+    ) {
+      return;
+    }
     db.prepare(
       "INSERT INTO price_snapshots (product_id, net_price, best_store, offer_count, captured_at) VALUES (?, ?, ?, ?, ?)"
-    ).run(String(productId), netPrice, bestStore || "", offerCount || 0, now);
+    ).run(key, netPrice, bestStore || "", offerCount || 0, now);
     return;
   }
+
+  for (let i = jsonState.price_snapshots.length - 1; i >= 0; i--) {
+    const s = jsonState.price_snapshots[i];
+    if (s.product_id === key) {
+      if (
+        Math.abs(Number(s.net_price) - netPrice) < 0.01 &&
+        nowMs - Date.parse(s.captured_at) < SNAPSHOT_THROTTLE_MS
+      ) {
+        return;
+      }
+      break;
+    }
+  }
+
   jsonState.price_snapshots.push({
-    product_id: String(productId),
+    product_id: key,
     net_price: netPrice,
     best_store: bestStore || "",
     offer_count: offerCount || 0,
@@ -303,12 +335,13 @@ export function getPriceSnapshots(productId, limit = 90) {
   if (!productId) return [];
   const key = String(productId);
   if (db) {
-    return db
+    const rows = db
       .prepare(
         `SELECT net_price, best_store, offer_count, captured_at
-         FROM price_snapshots WHERE product_id = ? ORDER BY captured_at ASC LIMIT ?`
+         FROM price_snapshots WHERE product_id = ? ORDER BY captured_at DESC LIMIT ?`
       )
       .all(key, limit);
+    return rows.reverse();
   }
   return jsonState.price_snapshots
     .filter((s) => s.product_id === key)

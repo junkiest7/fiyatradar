@@ -17,7 +17,10 @@ import {
 } from "./parsers.js";
 import { analyzeOffers, analyzePriceHistory } from "./analyzer.js";
 import {
+  fetchLiveProductPrice,
+  getSerperKeyPool,
   getVirtualDetail,
+  isFastOgHost,
   mergeLiveAndSerperResults,
   searchOfficialFallback,
   searchSerpApiTurkey,
@@ -40,31 +43,6 @@ const cache = new Map();
 const SEARCH_TTL_MS = 15 * 60 * 1000;
 const DETAIL_TTL_MS = 5 * 60 * 1000;
 const SUGGEST_TTL_MS = 15 * 60 * 1000;
-let serperRoundRobinIdx = 0;
-
-function getSerperKeyPool(clientKey = "") {
-  const keys = [];
-  const pushUnique = (raw) => {
-    const k = String(raw || "").trim();
-    if (k && !keys.includes(k)) keys.push(k);
-  };
-  pushUnique(clientKey);
-  const envList = [
-    ...String(process.env.SERPER_API_KEYS || "").split(/[\s,;]+/),
-    String(process.env.SERPER_API_KEY || ""),
-  ]
-    .map((k) => k.trim())
-    .filter(Boolean);
-  if (envList.length > 1) {
-    const start = serperRoundRobinIdx++ % envList.length;
-    for (let i = 0; i < envList.length; i++) {
-      pushUnique(envList[(start + i) % envList.length]);
-    }
-  } else {
-    envList.forEach(pushUnique);
-  }
-  return keys;
-}
 
 function getCached(key) {
   const entry = cache.get(key);
@@ -124,7 +102,7 @@ async function fetchHtml(url) {
 }
 
 /**
- * Live Turkish product autocomplete suggestions via Amazon TR suggestion endpoint.
+ * Live Turkish product autocomplete suggestions blending Google TR Suggest + Amazon TR Suggest.
  */
 export async function getSuggestions(query) {
   const q = (query || "").trim();
@@ -133,33 +111,97 @@ export async function getSuggestions(query) {
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
-  try {
-    const url = `https://completion.amazon.co.uk/api/2017/suggestions?mid=A33AVAJ2PDY3EV&alias=aps&prefix=${encodeURIComponent(q)}`;
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": DEFAULT_HEADERS["User-Agent"],
-        Accept: "application/json",
-      },
-      signal: AbortSignal.timeout(4000),
-    });
-    if (!res.ok) return [];
-    const json = await res.json();
-    const list = (json.suggestions || [])
-      .map((s) => s.value)
-      .filter(Boolean)
-      .slice(0, 8);
-    setCached(cacheKey, list, SUGGEST_TTL_MS);
-    return list;
-  } catch {
-    return [];
+  const googleUrl = `https://suggestqueries.google.com/complete/search?client=firefox&hl=tr&gl=tr&q=${encodeURIComponent(q)}`;
+  const amazonUrl = `https://completion.amazon.co.uk/api/2017/suggestions?mid=A33AVAJ2PDY3EV&alias=aps&prefix=${encodeURIComponent(q)}`;
+
+  const [googleList, amazonList] = await Promise.all([
+    fetch(googleUrl, {
+      headers: { "User-Agent": DEFAULT_HEADERS["User-Agent"], Accept: "application/json" },
+      signal: AbortSignal.timeout(2500),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((arr) => (Array.isArray(arr?.[1]) ? arr[1].map((s) => String(s || "").trim()).filter(Boolean) : []))
+      .catch(() => []),
+    fetch(amazonUrl, {
+      headers: { "User-Agent": DEFAULT_HEADERS["User-Agent"], Accept: "application/json" },
+      signal: AbortSignal.timeout(2500),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((json) => (json?.suggestions || []).map((s) => String(s?.value || "").trim()).filter(Boolean))
+      .catch(() => []),
+  ]);
+
+  const seen = new Set();
+  const merged = [];
+  const maxLen = Math.max(googleList.length, amazonList.length);
+  for (let i = 0; i < maxLen && merged.length < 8; i++) {
+    for (const candidate of [googleList[i], amazonList[i]]) {
+      if (!candidate) continue;
+      const key = candidate.toLocaleLowerCase("tr-TR");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(candidate);
+      if (merged.length >= 8) break;
+    }
   }
+
+  if (merged.length) setCached(cacheKey, merged, SUGGEST_TTL_MS);
+  return merged;
+}
+
+function extractUrlProductToken(urlStr) {
+  const s = String(urlStr || "");
+  const m =
+    s.match(/-p-([A-Za-z0-9]{4,})/i) ||
+    s.match(/\/dp\/([A-Z0-9]{8,12})/i) ||
+    s.match(/urunno=(\d{6,})/i) ||
+    s.match(/\/urun\/[^/]+\/([A-Za-z0-9_-]{4,})/i);
+  return m?.[1]?.toLowerCase() || "";
+}
+
+function attachPastedLinkComparison(searchResult, resolvedFromLink, liveLinkCheck) {
+  if (!resolvedFromLink) return searchResult;
+  const targetUrl = resolvedFromLink.expandedUrl || resolvedFromLink.originalUrl || "";
+  let pastedPrice = null;
+  let pastedPriceSource = "";
+
+  // Layer 1: Direct live page price (open FAST_OG_HOSTS stores)
+  if (typeof liveLinkCheck?.price === "number" && liveLinkCheck.price > 0) {
+    pastedPrice = liveLinkCheck.price;
+    pastedPriceSource = "live_page";
+  }
+
+  // Layer 2: Zero-extra-credit match against returned search products (WAF marketplaces: Trendyol/HB/Amazon/n11)
+  if (pastedPrice === null && Array.isArray(searchResult?.products)) {
+    const cleanTarget = targetUrl.replace(/[?#].*$/, "").replace(/\/+$/, "").toLowerCase();
+    const targetToken = extractUrlProductToken(targetUrl);
+    for (const p of searchResult.products) {
+      if (!(typeof p.lowestPrice === "number" && p.lowestPrice > 0)) continue;
+      const ext = String(p.externalUrl || "").replace(/[?#].*$/, "").replace(/\/+$/, "").toLowerCase();
+      if (!ext) continue;
+      if (ext === cleanTarget || (targetToken && extractUrlProductToken(ext) === targetToken)) {
+        pastedPrice = p.lowestPrice;
+        pastedPriceSource = "serp_match";
+        break;
+      }
+    }
+  }
+
+  return {
+    ...searchResult,
+    resolvedFromLink: {
+      ...resolvedFromLink,
+      pastedPrice,
+      pastedPriceSource,
+    },
+  };
 }
 
 /**
  * Searches Turkish e-commerce products with automatic multi-provider fallback:
- * 1. Serper.dev / SerpAPI Google Shopping TR (when API key is provided — 100% cloud-proof across 50+ TR stores)
+ * 1. Serper.dev / SerpAPI Google Shopping TR + Live Official Turkish Store Network (parallel hybrid!)
  * 2. Akakçe direct live engine (when server IP is accepted)
- * 3. Zero-key Official Fallback (T.C. Market Fiyatı + Migros Elektronik + Migros Sanal Market)
+ * 3. Zero-key Official Fallback (23 live Turkish stores with category-aware routing)
  */
 export async function searchProducts(query, options = {}) {
   let q = (query || "").trim();
@@ -173,6 +215,7 @@ export async function searchProducts(query, options = {}) {
 
   // Universal Turkish Store Link Resolver (Trendyol, ty.gl, Hepsiburada, Amazon TR, Stradivarius, Zara, n11, etc.)
   let resolvedFromLink = null;
+  let liveLinkPricePromise = Promise.resolve(null);
   if (isExternalStoreUrl(q)) {
     const resolved = await resolveStoreProductUrl(q);
     if (!resolved.resolvedQuery) {
@@ -181,6 +224,10 @@ export async function searchProducts(query, options = {}) {
       );
     }
     resolvedFromLink = resolved;
+    const linkTarget = resolved.expandedUrl || resolved.originalUrl;
+    if (linkTarget && isFastOgHost(linkTarget)) {
+      liveLinkPricePromise = fetchLiveProductPrice(linkTarget).catch(() => null);
+    }
     q = resolved.resolvedQuery;
   }
 
@@ -217,25 +264,28 @@ export async function searchProducts(query, options = {}) {
     const cKey = `serper-tr:${q.toLocaleLowerCase("tr-TR")}`;
     if (!options.refresh) {
       const cached = getCached(cKey);
-      if (cached) return { ...cached, cached: true, resolvedFromLink };
+      if (cached) {
+        const liveCheck = await liveLinkPricePromise;
+        return attachPastedLinkComparison({ ...cached, cached: true }, resolvedFromLink, liveCheck);
+      }
     }
     const livePromise = searchOfficialFallback(q).catch(() => null);
     for (const key of serperKeys) {
       try {
         const serperRes = await searchSerperTurkey(q, key);
-        const liveRes = await livePromise;
+        const [liveRes, liveCheck] = await Promise.all([livePromise, liveLinkPricePromise]);
         const merged = mergeLiveAndSerperResults(serperRes, liveRes);
         setCached(cKey, merged, SEARCH_TTL_MS);
-        return { ...merged, resolvedFromLink };
+        return attachPastedLinkComparison(merged, resolvedFromLink, liveCheck);
       } catch {
         // Rotate to next key or fall through to zero-key live engine
       }
     }
     // If all Serper keys failed, reuse the already-fetched live official store network result!
-    const liveFallback = await livePromise;
+    const [liveFallback, liveCheck] = await Promise.all([livePromise, liveLinkPricePromise]);
     if (liveFallback && liveFallback.totalFound > 0) {
       setCached(cKey, liveFallback, 5 * 60 * 1000);
-      return { ...liveFallback, resolvedFromLink };
+      return attachPastedLinkComparison(liveFallback, resolvedFromLink, liveCheck);
     }
   }
 
@@ -244,12 +294,15 @@ export async function searchProducts(query, options = {}) {
     const cKey = `serpapi-tr:${q.toLocaleLowerCase("tr-TR")}`;
     if (!options.refresh) {
       const cached = getCached(cKey);
-      if (cached) return { ...cached, cached: true, resolvedFromLink };
+      if (cached) {
+        const liveCheck = await liveLinkPricePromise;
+        return attachPastedLinkComparison({ ...cached, cached: true }, resolvedFromLink, liveCheck);
+      }
     }
     try {
-      const result = await searchSerpApiTurkey(q, serpApiKey);
+      const [result, liveCheck] = await Promise.all([searchSerpApiTurkey(q, serpApiKey), liveLinkPricePromise]);
       setCached(cKey, result, SEARCH_TTL_MS);
-      return { ...result, resolvedFromLink };
+      return attachPastedLinkComparison(result, resolvedFromLink, liveCheck);
     } catch {
       // Fall through to zero-key live engine
     }
@@ -261,7 +314,8 @@ export async function searchProducts(query, options = {}) {
   if (!options.refresh) {
     const cached = getCached(cacheKey);
     if (cached) {
-      return { ...cached, cached: true, resolvedFromLink };
+      const liveCheck = await liveLinkPricePromise;
+      return attachPastedLinkComparison({ ...cached, cached: true }, resolvedFromLink, liveCheck);
     }
   }
 
@@ -271,14 +325,14 @@ export async function searchProducts(query, options = {}) {
     const searchUrl = `${BASE_URL}/arama/?q=${encodeURIComponent(q)}${page > 1 ? `&p=${page}` : ""}`;
     html = await fetchHtml(searchUrl);
   } catch (akakceErr) {
-    const fallback = await searchOfficialFallback(q);
+    const [fallback, liveCheck] = await Promise.all([searchOfficialFallback(q), liveLinkPricePromise]);
     fallback.fallbackReason = akakceErr.message || "Akakçe erişimi kısıtlandı";
     // Keep consumer UX completely clean when zero-key Turkish stores return results
     fallback.fallbackNotice = fallback.totalFound > 0
       ? ""
       : "Canlı Türkiye mağaza ağında bu arama için eşleşme bulunamadı; daha kısa bir marka/model adıyla tekrar deneyebilirsiniz.";
     setCached(cacheKey, fallback, 5 * 60 * 1000);
-    return { ...fallback, resolvedFromLink };
+    return attachPastedLinkComparison(fallback, resolvedFromLink, liveCheck);
   }
 
   const $ = cheerio.load(html);

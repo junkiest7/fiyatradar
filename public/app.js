@@ -50,11 +50,15 @@ const KNOWN_TR_STORES = [
   "Hepsiburada",
   "Amazon Türkiye",
   "SuperStep",
+  "House of SuperStep",
   "FashFed",
   "Intersport",
+  "Barçın",
   "Beymen",
   "D&R",
   "Migros",
+  "Gratis",
+  "Gaming.Gen.TR",
   "MediaMarkt",
   "Teknosa",
   "Vatan Bilgisayar",
@@ -63,7 +67,15 @@ const KNOWN_TR_STORES = [
   "idefix",
   "Sportive",
   "Sporjinal",
+  "Occasion",
+  "Under Armour Türkiye",
+  "Lacoste Türkiye",
+  "Converse Türkiye",
   "Koton",
+  "Marks & Spencer Türkiye",
+  "GAP Türkiye",
+  "GANT Türkiye",
+  "Nautica Türkiye",
   "Tefal Türkiye",
   "Zara",
   "Stradivarius",
@@ -135,6 +147,7 @@ const state = {
   activeView: "search", // 'search' | 'detail' | 'compare' | 'cart' | 'watchlist' | 'history'
   lastQuery: "",
   searchData: null,
+  manualPastedPrice: null,
   searchMode: "retail", // 'retail' | 'secondhand'
   secondHandData: null,
   secondHandLoading: false,
@@ -197,6 +210,7 @@ const els = {
   searchForm: $("searchForm"),
   searchInput: $("searchInput"),
   clearSearchBtn: $("clearSearchBtn"),
+  pasteLinkChip: $("pasteLinkChip"),
   voiceSearchBtn: $("voiceSearchBtn"),
   photoSearchBtn: $("photoSearchBtn"),
   photoSearchInput: $("photoSearchInput"),
@@ -1034,6 +1048,7 @@ async function performSearch(query, opts = {}) {
     }
 
     state.searchData = data;
+    state.manualPastedPrice = null;
     state.searchMode = "retail";
     state.secondHandData = null;
     state.secondHandLoading = false;
@@ -1401,7 +1416,6 @@ function renderSecondHandView() {
             ? esc(sh.notice)
             : `"${esc(q)}" için Dolap, Gardrops veya sahibinden üzerinde doğrudan fiyatlı ilan eşleşmedi. Aşağıdaki tek tık bağlantılarla canlı ilanlara anında ulaşabilirsiniz.`
         }</p>
-        ${sh && !sh.liveIndexed ? `<button type="button" class="btn btn-primary btn-sm" data-open-settings="1" style="margin-top:10px;">Ücretsiz API ile Canlı Fiyatları Aç</button>` : ""}
       </div>
     `
       : "";
@@ -1665,23 +1679,87 @@ function renderSizeFilterBar() {
   els.sizeFilterBar.innerHTML = pills.join("");
 }
 
+function renderLinkSavingsBanner(data) {
+  if (!els.linkResolvedBanner) return;
+  const rfl = data?.resolvedFromLink;
+  if (!rfl?.resolvedQuery) {
+    els.linkResolvedBanner.hidden = true;
+    els.linkResolvedBanner.innerHTML = "";
+    return;
+  }
+
+  const retailPriced = (data.products || []).filter(
+    (p) =>
+      !p.isSecondHand &&
+      !p.isAccessory &&
+      !p.isListingPage &&
+      p.badge !== "Tüm Mağazalar" &&
+      typeof p.lowestPrice === "number" &&
+      p.lowestPrice > 0
+  );
+  const cheapest = retailPriced.length
+    ? retailPriced.reduce((best, p) => (p.lowestPrice < best.lowestPrice ? p : best), retailPriced[0])
+    : null;
+
+  const pastedPrice =
+    typeof rfl.pastedPrice === "number" && rfl.pastedPrice > 0
+      ? rfl.pastedPrice
+      : typeof state.manualPastedPrice === "number" && state.manualPastedPrice > 0
+        ? state.manualPastedPrice
+        : null;
+
+  let verdictHtml = "";
+  if (pastedPrice && cheapest) {
+    const diff = Math.round((pastedPrice - cheapest.lowestPrice) * 100) / 100;
+    const pct = pastedPrice > 0 ? Math.round((diff / pastedPrice) * 1000) / 10 : 0;
+    const cheaper = diff >= 10;
+    verdictHtml = `
+      <div class="link-savings-verdict ${cheaper ? "cheaper" : "neutral"}">
+        <div>
+          <span>Yapıştırdığın ilan (${esc(rfl.sourceStore)}): <strong class="mono">${fmtTL(pastedPrice)}</strong></span>
+          <span> → En ucuz canlı teklif (${esc(cheapest.source || cheapest.badge || "Mağaza")}): <strong class="mono">${fmtTL(cheapest.lowestPrice)}</strong></span>
+          ${
+            cheaper
+              ? ` — <strong style="color:var(--good);">${fmtTL(diff)} (%${pct}) daha ucuz!</strong>`
+              : ` — <strong>Yapıştırdığın ilan zaten en rekabetçi fiyatta.</strong>`
+          }
+        </div>
+        ${
+          cheaper && cheapest.externalUrl
+            ? `<a href="${esc(cheapest.externalUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-good btn-sm">En Ucuzuna Git ↗</a>`
+            : ""
+        }
+      </div>
+    `;
+  } else if (cheapest) {
+    // Layer 3: Single-field optional inline price input when WAF blocks direct scrape
+    verdictHtml = `
+      <form id="manualPastedPriceForm" class="link-manual-price-row">
+        <label for="manualPastedPriceInput"><strong>Daha ucuzu var mı?</strong> İlandaki fiyatı yaz:</label>
+        <input type="number" id="manualPastedPriceInput" class="input-sm" min="1" step="0.01" placeholder="Örn. ${Math.round(cheapest.lowestPrice * 1.15)}" value="${state.manualPastedPrice ?? ""}" />
+        <button type="submit" class="btn btn-primary btn-sm">Farkı Hesapla</button>
+      </form>
+    `;
+  }
+
+  els.linkResolvedBanner.hidden = false;
+  els.linkResolvedBanner.innerHTML = `
+    <div class="link-savings-card">
+      <div class="link-savings-top">
+        <span><strong>✓ ${esc(rfl.sourceStore)} bağlantısı çözüldü:</strong> "${esc(rfl.resolvedQuery)}" için tüm Türkiye mağazaları tarandı.</span>
+        <a href="${esc(rfl.expandedUrl || rfl.originalUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-sm">Orijinal Link ↗</a>
+      </div>
+      ${verdictHtml}
+    </div>
+  `;
+}
+
 function renderSearchResults() {
   const data = state.searchData;
   if (!data) return;
 
-  // Show link-resolved banner when user pasted a Trendyol/Hepsiburada/Amazon/Zara/Stradivarius link
-  if (els.linkResolvedBanner) {
-    if (data.resolvedFromLink?.resolvedQuery) {
-      els.linkResolvedBanner.hidden = false;
-      els.linkResolvedBanner.innerHTML = `
-        <span><strong>✓ ${esc(data.resolvedFromLink.sourceStore)} bağlantısı çözüldü:</strong> "${esc(data.resolvedFromLink.resolvedQuery)}" için diğer tüm Türkiye mağazaları tarandı.</span>
-        <a href="${esc(data.resolvedFromLink.expandedUrl || data.resolvedFromLink.originalUrl)}" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-sm">Orijinal Link ↗</a>
-      `;
-    } else {
-      els.linkResolvedBanner.hidden = true;
-      els.linkResolvedBanner.innerHTML = "";
-    }
-  }
+  // 3-Layer Link Paste "Daha Ucuzu Var mı?" Instant Savings Banner
+  renderLinkSavingsBanner(data);
 
   if (els.fallbackNoticeBanner) {
     if (data.fallbackNotice && !data.products?.length) {
@@ -1760,6 +1838,8 @@ function renderSearchResults() {
             ? `${sizes.slice(0, 6).join(" · ")} +${sizes.length - 6}`
             : sizes.join(" · ")
           : "";
+      const hasBasketDeal = p.priceSource === "basket_live" || Boolean(p.basketOfferLabel);
+      const hasLowStock = typeof p.stockCount === "number" && p.stockCount > 0 && p.stockCount <= 3;
       return `
         <article class="product-card ${isFavStore ? "is-fav-store" : ""}" data-url="${esc(p.url)}">
           <div class="product-card-media ${imgIsFavicon ? "is-favicon-wrap" : ""}" data-action="open-detail">
@@ -1773,6 +1853,9 @@ function renderSearchResults() {
             ${isFavStore ? `<span class="mini-badge pos-below" title="Ayarlar'da öncelikli seçtiğiniz mağaza">⭐ Favori</span>` : ""}
             ${p.badge ? `<span class="offer-pill">${esc(p.badge)}</span>` : ""}
             ${p.pricePosition ? `<span class="mini-badge pos-${esc(p.pricePosition.tier)}" title="${esc(p.pricePosition.note || "")}">${esc(p.pricePosition.label)}</span>` : ""}
+            ${hasBasketDeal ? `<span class="mini-badge basket-deal" title="${esc(p.basketOfferLabel || "Sepette Ek İndirim")}">🏷️ ${esc(p.priceSource === "basket_live" ? "Sepette İndirim" : p.basketOfferLabel.slice(0, 26))}</span>` : ""}
+            ${p.couponCode ? `<button type="button" class="coupon-copy-chip" data-copy-coupon="${esc(p.couponCode)}" title="Kupon kodunu kopyala">📋 ${esc(p.couponCode)}</button>` : ""}
+            ${hasLowStock ? `<span class="mini-badge stock-low">🔥 Son ${p.stockCount} adet</span>` : ""}
             ${colorLabel ? `<span class="color-tag">${renderColorSwatch(colorLabel)}${esc(colorLabel)}</span>` : ""}
             ${p.trustShield?.condition === "refurbished" ? `<span class="mini-badge warn">♻ Yenilenmiş</span>` : ""}
             ${p.trustShield?.condition === "demo" ? `<span class="mini-badge trap">⚠ Teşhir</span>` : ""}
@@ -1786,7 +1869,7 @@ function renderSearchResults() {
           ${sizePreview ? `<div class="card-sizes-line" title="Stoktaki beden/numaralar: ${esc(sizes.join(", "))}">Stokta: ${esc(sizePreview)}</div>` : ""}
           ${p.unitInfo ? `<div class="unit-pill" title="Otomatik birim maliyet (${esc(p.unitInfo.rawMatch)})">${esc(p.unitInfo.formatted)}</div>` : ""}
           <div class="product-card-pricing">
-            <span class="price-main">${p.lowestPrice ? fmtTL(p.lowestPrice) : p.isListingPage ? "Kategoride Gör" : "Mağazada Gör"}</span>
+            <span class="price-main">${p.lowestPrice ? fmtTL(p.lowestPrice) : p.isListingPage ? "Kategoride Gör" : "Mağazada Gör"}${p.stickerPrice && p.stickerPrice > p.lowestPrice ? `<span class="sticker-strike">${fmtTL(p.stickerPrice)}</span>` : ""}</span>
             <span class="offer-pill">${p.offerCount > 1 ? `${p.offerCount} satıcı` : p.source ? esc(p.source) : "1 satıcı"}</span>
           </div>
           <div class="product-card-footer">
@@ -2052,11 +2135,29 @@ function renderDetailView() {
   const instPrice = stats?.minNet || d.lowPrice || 0;
   const instCalc = computeInstallment(instPrice, state.installment.months, state.installment.monthlyRate);
 
+  const galleryImgs = Array.isArray(d.gallery) && d.gallery.length > 1 ? d.gallery.slice(0, 6) : [];
+
   const html = `
     <!-- Overview + Buy Timing Verdict -->
     <div class="overview-card">
-      <div class="overview-image-box">
-        ${d.image ? `<img src="${esc(d.image)}" alt="${esc(d.title)}" />` : `<span class="muted-text">Görsel yok</span>`}
+      <div class="detail-gallery-col">
+        <div class="overview-image-box">
+          ${d.image ? `<img id="detailMainImg" src="${esc(d.image)}" alt="${esc(d.title)}" />` : `<span class="muted-text">Görsel yok</span>`}
+        </div>
+        ${
+          galleryImgs.length > 1
+            ? `<div id="detailGalleryStrip" class="detail-gallery-strip">
+                ${galleryImgs
+                  .map(
+                    (gUrl, gIdx) => `
+                  <button type="button" class="detail-gallery-thumb ${gIdx === 0 ? "active" : ""}" data-gallery-src="${esc(gUrl)}" aria-label="Ürün fotoğrafı ${gIdx + 1}">
+                    <img src="${esc(gUrl)}" alt="" loading="lazy" />
+                  </button>`
+                  )
+                  .join("")}
+              </div>`
+            : ""
+        }
       </div>
 
       <div class="overview-meta">
@@ -2066,7 +2167,9 @@ function renderDetailView() {
           ${d.brand ? `<span class="meta-tag">${esc(d.brand)}</span>` : ""}
           <span class="meta-tag">${d.totalOfferCount} toplam mağaza teklifi (${d.offers.length} teklif derin incelendi)</span>
           ${d.unitInfo ? `<span class="meta-tag unit">Birim: ${esc(d.unitInfo.formatted)}</span>` : ""}
-          ${d.rating?.value ? `<span class="meta-tag">★ ${d.rating.value} / ${d.rating.best} (${d.rating.count})</span>` : ""}
+          ${d.rating?.value ? `<span class="meta-tag">★ ${d.rating.value} / ${d.rating.best || 5}${d.rating.count ? ` (${d.rating.count})` : ""}</span>` : ""}
+          ${d.basketOfferLabel ? `<span class="mini-badge basket-deal">🏷️ ${esc(d.basketOfferLabel)}</span>` : ""}
+          ${d.couponCode ? `<button type="button" class="coupon-copy-chip" data-copy-coupon="${esc(d.couponCode)}" title="Kupon kodunu kopyala">📋 Kupon: ${esc(d.couponCode)}</button>` : ""}
           <span class="meta-tag">Güncelleme: ${fmtDateTime(d.fetchedAt)}${d.cached ? " (önbellek)" : " (canlı)"}</span>
         </div>
 
@@ -2226,6 +2329,10 @@ function renderDetailView() {
           <label class="checkbox-pill">
             <input type="checkbox" id="filterFreeShipping" ${state.offerFilters.freeShippingOnly ? "checked" : ""} />
             Ücretsiz Kargo
+          </label>
+          <label class="checkbox-pill">
+            <input type="checkbox" id="filterInStockOnly" ${state.offerFilters.inStockOnly ? "checked" : ""} />
+            Sadece Stokta
           </label>
           ${
             d.trustSummary?.authorizedCount > 0
@@ -2471,8 +2578,23 @@ function renderDetailView() {
     state.offerFilters.storeSearch = e.target.value;
     renderOffersTableBody();
   });
+  $("detailGalleryStrip")?.addEventListener("click", (e) => {
+    const thumb = e.target.closest("[data-gallery-src]");
+    if (!thumb) return;
+    const mainImg = $("detailMainImg");
+    if (mainImg && thumb.dataset.gallerySrc) {
+      mainImg.src = thumb.dataset.gallerySrc;
+      $("detailGalleryStrip")
+        ?.querySelectorAll(".detail-gallery-thumb")
+        .forEach((b) => b.classList.toggle("active", b === thumb));
+    }
+  });
   $("filterFreeShipping")?.addEventListener("change", (e) => {
     state.offerFilters.freeShippingOnly = e.target.checked;
+    renderOffersTableBody();
+  });
+  $("filterInStockOnly")?.addEventListener("change", (e) => {
+    state.offerFilters.inStockOnly = e.target.checked;
     renderOffersTableBody();
   });
   $("filterAuthorizedOnly")?.addEventListener("change", (e) => {
@@ -2675,6 +2797,9 @@ function renderOffersTableBody() {
 
   if (state.offerFilters.freeShippingOnly) {
     list = list.filter((o) => o.shipping?.isFree);
+  }
+  if (state.offerFilters.inStockOnly) {
+    list = list.filter((o) => o.inStock !== false);
   }
   if (state.offerFilters.authorizedOnly) {
     list = list.filter((o) => o.trustShield?.isAuthorized || o.store?.isOfficialSeller);
@@ -3504,7 +3629,6 @@ function renderPushAlertCard() {
         </div>
       </div>
       <div class="push-alert-actions">
-        <button type="button" class="btn btn-secondary btn-sm" data-push-action="test" ${state.pushBusy ? "disabled" : ""}>Test Bildirimi Gönder</button>
         <button type="button" class="btn btn-ghost btn-sm" data-push-action="disable" ${state.pushBusy ? "disabled" : ""}>Kapat</button>
       </div>
     `;
@@ -3914,10 +4038,63 @@ function bindEvents() {
   els.secondHandPanel?.addEventListener("click", (e) => {
     if (e.target.closest("[data-refresh-secondhand]")) {
       loadSecondHandResults(true);
+    }
+  });
+
+  // 1-Tap Clipboard Link Paste ("Link Yapıştır") chip below search bar
+  els.pasteLinkChip?.addEventListener("click", async () => {
+    if (navigator.clipboard?.readText) {
+      try {
+        const text = (await navigator.clipboard.readText())?.trim() || "";
+        const extracted = extractUrlFromSharedText(text);
+        if (extracted && /^https?:\/\//i.test(extracted)) {
+          els.searchInput.value = extracted;
+          els.clearSearchBtn.hidden = false;
+          performSearch(extracted);
+          return;
+        }
+        if (text) {
+          els.searchInput.value = text;
+          els.clearSearchBtn.hidden = false;
+          els.searchInput.focus();
+          showToast("Panodaki metin arama kutusuna yapıştırıldı.");
+          return;
+        }
+      } catch {
+        // Fallback to manual paste focus on restricted browsers
+      }
+    }
+    els.searchInput.focus();
+    showToast("Mağaza bağlantısını arama kutusuna yapıştırın — otomatik taranacaktır.");
+  });
+
+  // Layer 3 manual pasted-link price form inside #linkResolvedBanner
+  els.linkResolvedBanner?.addEventListener("submit", (e) => {
+    const form = e.target.closest("#manualPastedPriceForm");
+    if (!form) return;
+    e.preventDefault();
+    const rawVal = $("manualPastedPriceInput")?.value?.trim() || "";
+    const num = Number.parseFloat(rawVal.replace(",", "."));
+    if (!Number.isFinite(num) || num <= 0) {
+      showToast("Lütfen geçerli bir TL fiyatı girin.");
       return;
     }
-    if (e.target.closest("[data-open-settings]")) {
-      openSettingsModal();
+    state.manualPastedPrice = Math.round(num * 100) / 100;
+    renderLinkSavingsBanner(state.searchData);
+  });
+
+  // One-tap coupon code copy across search cards & product detail
+  document.addEventListener("click", async (e) => {
+    const chip = e.target.closest("[data-copy-coupon]");
+    if (!chip) return;
+    e.stopPropagation();
+    const code = chip.dataset.copyCoupon || "";
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code);
+      showToast(`📋 Kupon kodu kopyalandı: ${code}`);
+    } catch {
+      showToast(`Kupon kodu: ${code}`);
     }
   });
 
@@ -3939,19 +4116,28 @@ function bindEvents() {
     if (file) openPhotoSearchWithFile(file);
   });
 
-  // Also support pasting a screenshot directly into the search box (Desktop / iPad)
+  // Support pasting either a screenshot (OCR) OR a Turkish store URL (instant search!)
   els.searchInput?.addEventListener("paste", (e) => {
     const items = e.clipboardData?.items;
-    if (!items) return;
-    for (const item of items) {
-      if (item.type && item.type.startsWith("image/")) {
-        const file = item.getAsFile();
-        if (file) {
-          e.preventDefault();
-          openPhotoSearchWithFile(file);
-          return;
+    if (items) {
+      for (const item of items) {
+        if (item.type && item.type.startsWith("image/")) {
+          const file = item.getAsFile();
+          if (file) {
+            e.preventDefault();
+            openPhotoSearchWithFile(file);
+            return;
+          }
         }
       }
+    }
+    const pastedText = (e.clipboardData?.getData("text") || "").trim();
+    const extracted = extractUrlFromSharedText(pastedText);
+    if (extracted && /^https?:\/\//i.test(extracted)) {
+      e.preventDefault();
+      els.searchInput.value = extracted;
+      els.clearSearchBtn.hidden = false;
+      performSearch(extracted);
     }
   });
 
@@ -4901,7 +5087,7 @@ async function renderSettingsPushBox() {
   if (!box) return;
   const env = getPushEnvironment();
 
-  if (env.needsIosHomeScreen) {
+  if (env.needsHomeScreenInstall) {
     box.innerHTML = `
       <div class="settings-push-status">
         <span class="status-dot warn"></span>

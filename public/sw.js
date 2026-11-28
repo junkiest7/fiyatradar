@@ -4,7 +4,7 @@
  * with cache fallback when offline, plus native iOS 16.4+ Web Push notifications.
  */
 
-const CACHE_NAME = "fiyatradar-v17";
+const CACHE_NAME = "fiyatradar-v18";
 const SHELL_ASSETS = [
   "/",
   "/index.html",

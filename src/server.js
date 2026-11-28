@@ -88,41 +88,103 @@ export function isPrivateOrReservedIp(ip) {
   return true;
 }
 
+const MAX_IMAGE_PROXY_BYTES = 5 * 1024 * 1024;
+const MAX_IMAGE_REDIRECTS = 3;
+
+async function validatePublicHttpsUrl(rawUrl) {
+  const parsed = new URL(rawUrl);
+  if (parsed.protocol !== "https:") return null;
+  const host = parsed.hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal")) return null;
+  if (net.isIP(host) && isPrivateOrReservedIp(host)) return null;
+  const resolved = await dns.lookup(host, { all: true }).catch(() => []);
+  if (!resolved.length || resolved.some((r) => isPrivateOrReservedIp(r.address))) return null;
+  return parsed;
+}
+
+async function readStreamWithLimit(body, maxBytes) {
+  if (!body) return Buffer.alloc(0);
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of body) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.length;
+    if (total > maxBytes) {
+      return null;
+    }
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks, total);
+}
+
+// Lightweight in-memory IP rate limiter (no external dependency)
+function createRateLimiter({ windowMs = 60_000, max = 30 } = {}) {
+  const hits = new Map();
+  return (req, res, next) => {
+    const ip = String(req.headers["x-forwarded-for"] || req.ip || "local").split(",")[0].trim();
+    const now = Date.now();
+    const entry = hits.get(ip);
+    if (!entry || now > entry.resetAt) {
+      if (hits.size > 2000) hits.clear();
+      hits.set(ip, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+    entry.count++;
+    if (entry.count > max) {
+      res.setHeader("Retry-After", String(Math.ceil((entry.resetAt - now) / 1000)));
+      return res.status(429).json({ error: "Çok fazla istek gönderildi. Lütfen birkaç saniye sonra tekrar deneyin." });
+    }
+    return next();
+  };
+}
+
+const searchRateLimit = createRateLimiter({ windowMs: 60_000, max: 35 });
+const refreshRateLimit = createRateLimiter({ windowMs: 60_000, max: 8 });
+
 app.get("/api/image-proxy", async (req, res) => {
   try {
     const raw = String(req.query.url || "").trim();
     if (!raw) return res.status(400).end();
-    const parsed = new URL(raw);
-    if (parsed.protocol !== "https:") return res.status(400).end();
-    const host = parsed.hostname.toLowerCase();
-    if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal") || net.isIP(host)) {
-      if (isPrivateOrReservedIp(host) || host === "localhost" || host.endsWith(".local") || host.endsWith(".internal")) {
-        return res.status(403).end();
+
+    let currentUrl = await validatePublicHttpsUrl(raw);
+    if (!currentUrl) return res.status(403).end();
+
+    let upstream = null;
+    for (let hop = 0; hop <= MAX_IMAGE_REDIRECTS; hop++) {
+      upstream = await fetch(currentUrl.toString(), {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15",
+          Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
+        },
+        redirect: "manual",
+        signal: AbortSignal.timeout(6000),
+      });
+
+      if (upstream.status >= 300 && upstream.status < 400) {
+        const loc = upstream.headers.get("location");
+        if (!loc || hop === MAX_IMAGE_REDIRECTS) return res.status(403).end();
+        const nextHref = new URL(loc, currentUrl).toString();
+        currentUrl = await validatePublicHttpsUrl(nextHref);
+        if (!currentUrl) return res.status(403).end();
+        continue;
       }
+      break;
     }
 
-    const resolved = await dns.lookup(host, { all: true }).catch(() => []);
-    if (!resolved.length || resolved.some((r) => isPrivateOrReservedIp(r.address))) {
-      return res.status(403).end();
-    }
-
-    const upstream = await fetch(parsed.toString(), {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15",
-        Accept: "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8",
-      },
-      redirect: "follow",
-      signal: AbortSignal.timeout(6000),
-    });
-    if (!upstream.ok) return res.status(404).end();
+    if (!upstream || !upstream.ok) return res.status(404).end();
 
     const contentType = String(upstream.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
     if (!contentType.startsWith("image/") || contentType.includes("svg")) {
       return res.status(415).end();
     }
 
-    const buf = Buffer.from(await upstream.arrayBuffer());
-    if (buf.length > 5 * 1024 * 1024) return res.status(413).end();
+    const declaredLen = Number.parseInt(upstream.headers.get("content-length") || "0", 10);
+    if (Number.isFinite(declaredLen) && declaredLen > MAX_IMAGE_PROXY_BYTES) {
+      return res.status(413).end();
+    }
+
+    const buf = await readStreamWithLimit(upstream.body, MAX_IMAGE_PROXY_BYTES);
+    if (!buf) return res.status(413).end();
 
     res.setHeader("Content-Type", contentType);
     res.setHeader("Cache-Control", "public, max-age=3600");
@@ -150,34 +212,12 @@ app.get("/api/providers", (req, res) => {
   ].filter(Boolean);
   const hasServerSerper = serverKeys.length > 0;
   const hasServerSerpApi = Boolean((process.env.SERPAPI_KEY || "").trim());
-  const hasClientSerper = Boolean(String(req.headers["x-serper-key"] || "").trim());
-  const hasClientSerpApi = Boolean(String(req.headers["x-serpapi-key"] || "").trim());
   res.json({
-    googleShoppingReady: hasServerSerper || hasServerSerpApi || hasClientSerper || hasClientSerpApi,
+    googleShoppingReady: hasServerSerper || hasServerSerpApi,
     serverSerper: hasServerSerper,
     serverSerperKeyCount: serverKeys.length,
     serverSerpApi: hasServerSerpApi,
-    clientSerper: hasClientSerper,
-    clientSerpApi: hasClientSerpApi,
   });
-});
-
-// Live Serper API key verification endpoint
-app.post("/api/providers/test", async (req, res) => {
-  try {
-    const firstServerKey = [
-      ...String(process.env.SERPER_API_KEYS || "").split(/[\s,;]+/),
-      String(process.env.SERPER_API_KEY || ""),
-    ].find(Boolean);
-    const key = String(req.body?.serperKey || req.headers["x-serper-key"] || firstServerKey || "").trim();
-    if (!key) {
-      return res.status(400).json({ ok: false, error: "Test etmek için bir Serper API anahtarı girin." });
-    }
-    const result = await testSerperKey(key);
-    res.json(result);
-  } catch (err) {
-    res.status(400).json({ ok: false, error: err.message });
-  }
 });
 
 // Live Turkish autocomplete suggestions
@@ -193,7 +233,7 @@ app.get("/api/suggest", async (req, res) => {
 });
 
 // Live product search with sorting and price filtering
-app.get("/api/search", async (req, res) => {
+app.get("/api/search", searchRateLimit, async (req, res) => {
   try {
     const q = String(req.query.q || "").trim();
     if (!q) {
@@ -614,13 +654,39 @@ app.delete("/api/watchlist/:id", (req, res) => {
 async function refreshAllWatchlistAndNotify(keys = {}) {
   const before = getWatchlist();
   const results = [];
+  const detailByUrl = new Map();
+
+  // Deduplicate canonical URLs & run with bounded concurrency (3) to avoid Render 30s timeouts
+  const uniqueUrls = [...new Set(before.map((it) => it.url).filter(Boolean))];
+  const fallbackByUrl = new Map();
+  for (const it of before) {
+    if (it.url && !fallbackByUrl.has(it.url)) fallbackByUrl.set(it.url, it.title);
+  }
+
+  let cursor = 0;
+  const workerCount = Math.min(3, Math.max(1, uniqueUrls.length));
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (cursor < uniqueUrls.length) {
+        const url = uniqueUrls[cursor++];
+        try {
+          const detail = await getProductDetail(url, {
+            refresh: true,
+            fallbackQuery: fallbackByUrl.get(url) || "",
+            ...keys,
+          });
+          detailByUrl.set(url, { ok: true, detail });
+        } catch (err) {
+          detailByUrl.set(url, { ok: false, error: err.message });
+        }
+      }
+    })
+  );
+
   for (const item of before) {
-    try {
-      const detail = await getProductDetail(item.url, {
-        refresh: true,
-        fallbackQuery: item.title,
-        ...keys,
-      });
+    const outcome = detailByUrl.get(item.url);
+    if (outcome?.ok && outcome.detail) {
+      const detail = outcome.detail;
       upsertWatchlistItem({
         id: item.id,
         title: detail.title,
@@ -637,10 +703,11 @@ async function refreshAllWatchlistAndNotify(keys = {}) {
         offer_count: detail.totalOfferCount,
       });
       results.push({ id: item.id, ok: true });
-    } catch (err) {
-      results.push({ id: item.id, ok: false, error: err.message });
+    } else {
+      results.push({ id: item.id, ok: false, error: outcome?.error || "Güncellenemedi" });
     }
   }
+
   const items = getWatchlist();
   let pushSummary = { alerts: [], pushSentCount: 0 };
   try {
@@ -657,8 +724,19 @@ async function refreshAllWatchlistAndNotify(keys = {}) {
   };
 }
 
-// Live batch refresh of all watched items (with automatic API key forwarding, re-hydration & iOS Push alerts)
-app.post("/api/watchlist/refresh", async (req, res) => {
+function isAuthorizedCronRequest(req) {
+  const secret = String(process.env.CRON_SECRET || "").trim();
+  const isProd = process.env.NODE_ENV === "production" || Boolean(process.env.RENDER);
+  if (!secret) {
+    // Fail closed in production when CRON_SECRET is not configured
+    return !isProd;
+  }
+  const provided = String(req.headers["x-cron-secret"] || req.query.secret || "").trim();
+  return provided === secret;
+}
+
+// Live batch refresh of all watched items (parallelized, URL-deduplicated & rate-limited)
+app.post("/api/watchlist/refresh", refreshRateLimit, async (req, res) => {
   try {
     const keys = extractReqKeys(req);
     const out = await refreshAllWatchlistAndNotify(keys);
@@ -704,46 +782,10 @@ app.post("/api/push/unsubscribe", (req, res) => {
   res.json({ ok: true, subscriberCount: getPushSubscriptions().length });
 });
 
-app.post("/api/push/test", async (req, res) => {
-  try {
-    const payload = {
-      title: "🔔 FiyatRadar Bildirimleri Aktif!",
-      body: "Takip listenizdeki bir ürün hedef fiyata indiğinde veya %10+ düştüğünde kilit ekranınıza anında haber vereceğiz.",
-      url: "/?view=watchlist",
-      tag: `fr-test-${Date.now()}`,
-    };
-
-    const singleSub = req.body?.subscription;
-    if (singleSub?.endpoint && singleSub?.keys?.p256dh && singleSub?.keys?.auth) {
-      if (!isValidPushEndpoint(singleSub.endpoint)) {
-        return res.status(400).json({ error: "Geçersiz abonelik adresi." });
-      }
-      savePushSubscription(singleSub, req.headers["user-agent"] || "");
-      const r = await sendPushToSubscription(singleSub, payload);
-      if (!r.ok) {
-        return res.status(502).json({ ok: false, error: r.error || "Test bildirimi gönderilemedi." });
-      }
-      return res.json({ ok: true, sent: 1 });
-    }
-
-    const r = await broadcastPush(payload);
-    if (r.sent === 0) {
-      return res.status(400).json({ ok: false, error: "Kayıtlı aktif bildirim aboneliği bulunamadı." });
-    }
-    res.json({ ok: true, ...r });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// Cron / Background Watchlist Check & Lock-Screen Push Trigger
-app.post("/api/push/check-watchlist", async (req, res) => {
-  const secret = String(process.env.CRON_SECRET || "").trim();
-  if (secret) {
-    const provided = String(req.headers["x-cron-secret"] || req.query.secret || "").trim();
-    if (provided !== secret) {
-      return res.status(401).json({ error: "Yetkisiz istek." });
-    }
+// Cron / Background Watchlist Check & Lock-Screen Push Trigger (fail-closed in production)
+app.post("/api/push/check-watchlist", refreshRateLimit, async (req, res) => {
+  if (!isAuthorizedCronRequest(req)) {
+    return res.status(401).json({ error: "Yetkisiz istek." });
   }
   try {
     const keys = extractReqKeys(req);
